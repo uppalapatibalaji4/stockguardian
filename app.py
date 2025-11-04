@@ -1,0 +1,158 @@
+# app.py: Main Streamlit app for StockGuardian
+
+import streamlit as st
+from utils import *
+import threading
+import schedule
+import time
+from transformers import pipeline
+
+# Initialize DB and session state
+conn = setup_db()
+if 'investments' not in st.session_state:
+    st.session_state.investments = []
+if 'email' not in st.session_state:
+    st.session_state.email = ""
+if 'sender_email' not in st.session_state:
+    st.session_state.sender_email = os.getenv('EMAIL_SENDER', '')  # Use env vars for deployment
+if 'sender_password' not in st.session_state:
+    st.session_state.sender_password = os.getenv('EMAIL_PASSWORD', '')
+
+# Load AI bot model (distilgpt2 with finance prompt engineering)
+@st.cache_resource
+def load_bot():
+    return pipeline('text-generation', model='distilgpt2')
+
+generator = load_bot()
+
+def generate_bot_response(query, context):
+    """Generate response with model, tying to user data."""
+    prompt = f"Finance expert: User investments: {context}. Question: {query}. Answer concisely:"
+    try:
+        response = generator(prompt, max_length=100, num_return_sequences=1)[0]['generated_text']
+        return response.split("Answer concisely:")[-1].strip()
+    except:
+        return "I'm thinking... Try again."
+
+# Background scheduler thread
+def run_scheduler():
+    """Run alert checks every 10 min."""
+    while True:
+        schedule.run_pending()
+        time.sleep(60)
+
+schedule.every(10).minutes.do(check_alerts, conn, st.session_state.sender_email, st.session_state.sender_password)
+if not hasattr(st, "scheduler_started"):
+    scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
+    scheduler_thread.start()
+    st.scheduler_started = True
+
+# UI: Title and Warnings
+st.title("StockGuardian: Your Personal Stock Agent")
+st.warning("API Limits: yfinance may throttle requests. Use sparingly. Emails hashed for security.")
+
+# Setup: Email for notifications
+if not st.session_state.email:
+    st.subheader("Setup")
+    email = st.text_input("Enter your email for alerts:")
+    sender_email = st.text_input("Sender Gmail (for SMTP):", value=st.session_state.sender_email)
+    sender_password = st.text_input("Gmail App Password:", type="password", value=st.session_state.sender_password)
+    if st.button("Save Setup"):
+        if "@" in email and sender_email and sender_password:
+            st.session_state.email = email
+            st.session_state.sender_email = sender_email
+            st.session_state.sender_password = sender_password
+            st.success("Setup saved! Proceed to tabs.")
+        else:
+            st.error("Please fill all fields correctly.")
+
+# Tabs
+tab1, tab2, tab3 = st.tabs(["Dashboard", "Alerts", "Chat Bot"])
+
+with tab1:
+    st.subheader("Investment Query and Research")
+    st.write("Agent: Please provide details from your trading platform: stock symbols (e.g., AAPL, WEBSOL), buy prices, quantities, purchase dates, and platform (e.g., Zerodha).")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        symbol = st.text_input("Stock Symbol:", key="sym")
+        buy_price = st.number_input("Buy Price:", min_value=0.0, key="price")
+        quantity = st.number_input("Quantity:", min_value=1, key="qty")
+    with col2:
+        purchase_date = st.date_input("Purchase Date:", key="date")
+        platform = st.text_input("Platform:", key="plat")
+
+    if st.button("Add Investment"):
+        if symbol and buy_price > 0 and quantity > 0:
+            c = conn.cursor()
+            c.execute("INSERT INTO investments VALUES (?, ?, ?, ?, ?, ?)",
+                      (symbol.upper(), buy_price, quantity, str(purchase_date), platform, st.session_state.email))
+            conn.commit()
+            st.success(f"Added {symbol.upper()}!")
+            st.rerun()
+        else:
+            st.error("Fill all fields.")
+
+    # Load from DB
+    c = conn.cursor()
+    db_investments = c.execute("SELECT symbol, buy_price, quantity, purchase_date, platform FROM investments WHERE email=?", (st.session_state.email,)).fetchall()
+    st.session_state.investments = [{'symbol': row[0], 'buy_price': row[1], 'quantity': row[2], 'purchase_date': row[3], 'platform': row[4]} for row in db_investments]
+
+    if st.session_state.investments:
+        df = calculate_profit_loss(st.session_state.investments)
+        st.dataframe(df.style.format({
+            'current_price': '${:.2f}',
+            'profit_loss_abs': '${:.2f}',
+            'profit_loss_pct': '{:.2f}%'
+        }), use_container_width=True)
+
+        for inv in st.session_state.investments:
+            with st.expander(f"Chart & Forecast: {inv['symbol']}"):
+                data = fetch_stock_data(inv['symbol'])
+                if not data['history'].empty:
+                    st.line_chart(data['history']['Close'].tail(60), use_container_width=True)
+                    forecast = forecast_with_prophet(data['history'])
+                    if isinstance(forecast, pd.DataFrame):
+                        st.write("30-Day Forecast:")
+                        st.line_chart(forecast.set_index('ds')['yhat'])
+                    st.write(short_term_prediction(data['history']))
+                else:
+                    st.write("No historical data.")
+
+with tab2:
+    st.subheader("Notification Setup")
+    if st.session_state.investments:
+        symbol = st.selectbox("Select Stock:", [inv['symbol'] for inv in st.session_state.investments])
+        alert_type = st.selectbox("Alert Type:", ['Target Price', 'Profit %', 'Drop %'])
+        threshold = st.number_input("Threshold (e.g., 50 for price, 20 for %):", min_value=0.0)
+        if st.button("Set Alert"):
+            db_type = 'price' if alert_type == 'Target Price' else 'profit_pct' if alert_type == 'Profit %' else 'drop_pct'
+            c = conn.cursor()
+            c.execute("INSERT INTO alerts VALUES (?, ?, ?, ?)",
+                      (symbol, db_type, threshold, st.session_state.email))
+            conn.commit()
+            st.success(f"Alert set: {alert_type} = {threshold}")
+            st.rerun()
+
+        alerts = c.execute("SELECT symbol, alert_type, threshold FROM alerts WHERE email=?", (st.session_state.email,)).fetchall()
+        if alerts:
+            st.write("Active Alerts:")
+            alert_df = pd.DataFrame(alerts, columns=['Stock', 'Type', 'Threshold'])
+            alert_df['Type'] = alert_df['Type'].map({'price': 'Target Price', 'profit_pct': 'Profit %', 'drop_pct': 'Drop %'})
+            st.table(alert_df)
+        else:
+            st.info("No alerts set.")
+    else:
+        st.write("Add investments first.")
+
+with tab3:
+    st.subheader("AI Chat Bot")
+    context = ", ".join([f"{inv['symbol']} (${inv['buy_price']} x {inv['quantity']})" for inv in st.session_state.investments])
+    user_query = st.chat_input("Ask about your stocks (e.g., 'Should I sell WEBSOL?')")
+    if user_query:
+        with st.chat_message("user"):
+            st.write(user_query)
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking..."):
+                response = generate_bot_response(user_query, context)
+            st.write(response)
