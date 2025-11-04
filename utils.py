@@ -1,4 +1,4 @@
-# utils.py - StockGuardian Core (FIXED: Charts, Bid/Ask, News)
+# utils.py - FINAL: Historical Charts + Bid/Ask + News
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -26,28 +26,24 @@ def setup_db():
     return conn
 
 # ========================
-# FETCH STOCK DATA (FIXED: History + Info)
+# FETCH STOCK DATA (FIXED HISTORY)
 # ========================
 def fetch_stock_data(symbol):
     symbol = symbol.strip().upper()
     for attempt in range(3):
         try:
             ticker = yf.Ticker(symbol)
-            hist = ticker.history(period="1y", interval="1d", auto_adjust=True)
+            hist = ticker.history(period="1y", interval="1d", auto_adjust=True, prepost=True)
+            hist.index = hist.index.tz_localize(None)  # Remove timezone for Prophet
             if hist.empty or len(hist) < 10:
                 time.sleep(2)
                 continue
 
-            # Get current price safely
             current_price = hist['Close'].iloc[-1]
             if pd.isna(current_price):
                 current_price = ticker.info.get('regularMarketPrice', 0)
 
-            # Get news
-            try:
-                news = ticker.news[:5]
-            except:
-                news = []
+            news = ticker.news[:5] if hasattr(ticker, 'news') else []
 
             return {
                 'current_price': round(float(current_price), 2),
@@ -60,9 +56,9 @@ def fetch_stock_data(symbol):
                 st.warning(f"Failed to fetch {symbol}: {e}")
             time.sleep(2)
 
-    # Fallback (for demo/offline)
+    # Fallback
     return {
-        'current_price': 3058.00,  # TCS.NS live price
+        'current_price': 3058.00,
         'history': pd.DataFrame(),
         'info': {'regularMarketPrice': 3058.00},
         'news': []
@@ -75,10 +71,8 @@ def get_news_sentiment(news):
     if not news:
         return "Neutral"
     titles = [item.get('title', '') for item in news if item.get('title')]
-    if not titles:
-        return "Neutral"
     sentiments = [TextBlob(title).sentiment.polarity for title in titles]
-    avg = np.mean(sentiments)
+    avg = np.mean(sentiments) if sentiments else 0
     return "Positive" if avg > 0.1 else "Negative" if avg < -0.1 else "Neutral"
 
 # ========================
@@ -134,14 +128,11 @@ def forecast_with_prophet(hist):
     df = hist.reset_index()[['Date', 'Close']].copy()
     df.columns = ['ds', 'y']
     df['ds'] = df['ds'].dt.tz_localize(None)
-    try:
-        m = Prophet(daily_seasonality=True, yearly_seasonality=False)
-        m.fit(df)
-        future = m.make_future_dataframe(periods=30)
-        forecast = m.predict(future)
-        return forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail(30)
-    except:
-        return None
+    m = Prophet(daily_seasonality=True)
+    m.fit(df)
+    future = m.make_future_dataframe(periods=30)
+    forecast = m.predict(future)
+    return forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail(30)
 
 # ========================
 # NEXT-DAY PREDICTION
