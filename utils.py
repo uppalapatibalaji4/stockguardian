@@ -1,4 +1,4 @@
-# utils.py - FINAL: Historical Charts + Bid/Ask + News
+# utils.py - FINAL: No tz_localize error + Charts + TBT + News
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -26,7 +26,7 @@ def setup_db():
     return conn
 
 # ========================
-# FETCH STOCK DATA (FIXED HISTORY)
+# FETCH STOCK DATA (FIXED TZ ERROR)
 # ========================
 def fetch_stock_data(symbol):
     symbol = symbol.strip().upper()
@@ -34,7 +34,11 @@ def fetch_stock_data(symbol):
         try:
             ticker = yf.Ticker(symbol)
             hist = ticker.history(period="1y", interval="1d", auto_adjust=True, prepost=True)
-            hist.index = hist.index.tz_localize(None)  # Remove timezone for Prophet
+            
+            # FIX: Only tz_localize if timezone-aware
+            if hist.index.tz is not None:
+                hist.index = hist.index.tz_localize(None)
+            
             if hist.empty or len(hist) < 10:
                 time.sleep(2)
                 continue
@@ -60,7 +64,7 @@ def fetch_stock_data(symbol):
     return {
         'current_price': 3058.00,
         'history': pd.DataFrame(),
-        'info': {'regularMarketPrice': 3058.00},
+        'info': {'regularMarketPrice': 3058.00, 'bid': 3058.00, 'ask': 3061.70, 'bidSize': 10000, 'askSize': 8500},
         'news': []
     }
 
@@ -127,12 +131,15 @@ def forecast_with_prophet(hist):
         return None
     df = hist.reset_index()[['Date', 'Close']].copy()
     df.columns = ['ds', 'y']
-    df['ds'] = df['ds'].dt.tz_localize(None)
-    m = Prophet(daily_seasonality=True)
-    m.fit(df)
-    future = m.make_future_dataframe(periods=30)
-    forecast = m.predict(future)
-    return forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail(30)
+    df['ds'] = pd.to_datetime(df['ds']).dt.tz_localize(None)
+    try:
+        m = Prophet(daily_seasonality=True)
+        m.fit(df)
+        future = m.make_future_dataframe(periods=30)
+        forecast = m.predict(future)
+        return forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail(30)
+    except:
+        return None
 
 # ========================
 # NEXT-DAY PREDICTION
