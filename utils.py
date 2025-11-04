@@ -66,41 +66,59 @@ def get_news_sentiment(news):
         return "Negative"
     return "Neutral"
 
-# Calculate profit/loss
+# Calculate profit/loss - SAFE VERSION
 def calculate_profit_loss(investments):
-    """Compute P/L for each investment."""
+    """Compute P/L for each investment with error handling."""
     results = []
     for inv in investments:
         data = fetch_stock_data(inv['symbol'])
         current_price = data['current_price']
-        if current_price == 0:
+        buy_price = inv['buy_price']
+        quantity = inv['quantity']
+
+        # Handle invalid ticker
+        if current_price == 0 or current_price is None:
             results.append({
                 'symbol': inv['symbol'],
                 'current_price': 'N/A',
                 'profit_loss_abs': 'N/A',
                 'profit_loss_pct': 'N/A',
-                'breakeven': inv['buy_price'],
-                'stage': 'Data Unavailable',
+                'breakeven': f"${buy_price:.2f}" if buy_price > 0 else "N/A",
+                'stage': 'No Data',
                 'sentiment': 'N/A',
-                'advice': 'Check internet or try later.'
+                'advice': f"{inv['symbol']} not found or delisted."
             })
             continue
 
-        current_value = current_price * inv['quantity']
-        buy_value = inv['buy_price'] * inv['quantity']
+        # Handle zero or negative buy price
+        if buy_price <= 0:
+            results.append({
+                'symbol': inv['symbol'],
+                'current_price': f"${current_price:.2f}",
+                'profit_loss_abs': 'N/A',
+                'profit_loss_pct': 'N/A',
+                'breakeven': 'Invalid',
+                'stage': 'Error',
+                'sentiment': get_news_sentiment(data['news']),
+                'advice': 'Buy price must be > 0.'
+            })
+            continue
+
+        current_value = current_price * quantity
+        buy_value = buy_price * quantity
         profit_loss_abs = current_value - buy_value
-        profit_loss_pct = (profit_loss_abs / buy_value) * 100 if buy_value > 0 else 0
-        breakeven = inv['buy_price']
+        profit_loss_pct = (profit_loss_abs / buy_value) * 100
+        breakeven = buy_price
         stage = f"In Profit: +{profit_loss_pct:.2f}%" if profit_loss_pct > 0 else f"At Loss: {profit_loss_pct:.2f}%"
         sentiment = get_news_sentiment(data['news'])
-        advice = f"{inv['symbol']} is in a {'bullish' if profit_loss_pct > 0 else 'bearish'} trend. Sentiment: {sentiment}."
+        advice = f"{inv['symbol']} {'bullish' if profit_loss_pct > 0 else 'bearish'} trend. Sentiment: {sentiment}."
 
         results.append({
             'symbol': inv['symbol'],
-            'current_price': current_price,
-            'profit_loss_abs': profit_loss_abs,
-            'profit_loss_pct': profit_loss_pct,
-            'breakeven': breakeven,
+            'current_price': f"${current_price:.2f}",
+            'profit_loss_abs': f"${profit_loss_abs:.2f}",
+            'profit_loss_pct': f"{profit_loss_pct:.2f}%",
+            'breakeven': f"${breakeven:.2f}",
             'stage': stage,
             'sentiment': sentiment,
             'advice': advice
