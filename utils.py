@@ -1,23 +1,15 @@
-# utils.py: Helper functions for StockGuardian
-
+# utils.py - FIXED FOR .NS STOCKS
 import yfinance as yf
 import pandas as pd
-from datetime import datetime
-from textblob import TextBlob
-import hashlib
 from prophet import Prophet
-from sklearn.linear_model import LinearRegression
-import numpy as np
 import sqlite3
+import streamlit as st
 import smtplib
 from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-import os
-import streamlit as st
+import hashlib
 
-# Database setup
+# DB Setup
 def setup_db():
-    """Initialize SQLite DB for investments and alerts."""
     conn = sqlite3.connect('investments.db')
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS investments
@@ -27,185 +19,109 @@ def setup_db():
     conn.commit()
     return conn
 
-# Fetch stock data with fallback
+# Fetch stock data - FIXED FOR .NS
 def fetch_stock_data(symbol):
-    """Fetch real-time/historical data using yfinance."""
     try:
-        stock = yf.Ticker(symbol)
-        hist = stock.history(period='1y')
-        if hist.empty:
-            return {'current_price': 0, 'history': pd.DataFrame(), 'volume': 0, 'news': []}
-        current_price = hist['Close'].iloc[-1]
-        news = stock.news[:5]  # Top 5 news
-        return {
-            'current_price': current_price,
-            'history': hist,
-            'volume': hist['Volume'].mean(),
-            'news': news
-        }
-    except Exception as e:
-        st.warning(f"Could not fetch {symbol}: {e}. Using fallback.")
-        return {'current_price': 0, 'history': pd.DataFrame(), 'volume': 0, 'news': []}
+        ticker = yf.Ticker(symbol)
+        history = ticker.history(period="60d")
+        if history.empty:
+            return {'history': pd.DataFrame(), 'info': {}}
+        info = ticker.info
+        return {'history': history, 'info': info}
+    except:
+        return {'history': pd.DataFrame(), 'info': {}}
 
-# Simulate news sentiment
-def get_news_sentiment(news):
-    """Analyze headlines with TextBlob."""
-    if not news:
-        return "Neutral"
-    sentiments = []
-    for article in news:
-        if 'title' in article:
-            blob = TextBlob(article['title'])
-            sentiments.append(blob.sentiment.polarity)
-    if not sentiments:
-        return "Neutral"
-    avg = np.mean(sentiments)
-    if avg > 0.1:
-        return "Positive"
-    elif avg < -0.1:
-        return "Negative"
-    return "Neutral"
-
-# Calculate profit/loss - SAFE VERSION
+# Calculate P&L
 def calculate_profit_loss(investments):
-    """Compute P/L for each investment with error handling."""
-    results = []
+    data = []
     for inv in investments:
-        data = fetch_stock_data(inv['symbol'])
-        current_price = data['current_price']
-        buy_price = inv['buy_price']
-        quantity = inv['quantity']
-
-        # Handle invalid ticker
-        if current_price == 0 or current_price is None:
-            results.append({
-                'symbol': inv['symbol'],
-                'current_price': 'N/A',
-                'profit_loss_abs': 'N/A',
-                'profit_loss_pct': 'N/A',
-                'breakeven': f"${buy_price:.2f}" if buy_price > 0 else "N/A",
-                'stage': 'No Data',
-                'sentiment': 'N/A',
-                'advice': f"{inv['symbol']} not found or delisted."
-            })
-            continue
-
-        # Handle zero or negative buy price
-        if buy_price <= 0:
-            results.append({
-                'symbol': inv['symbol'],
-                'current_price': f"${current_price:.2f}",
-                'profit_loss_abs': 'N/A',
-                'profit_loss_pct': 'N/A',
-                'breakeven': 'Invalid',
-                'stage': 'Error',
-                'sentiment': get_news_sentiment(data['news']),
-                'advice': 'Buy price must be > 0.'
-            })
-            continue
-
-        current_value = current_price * quantity
-        buy_value = buy_price * quantity
-        profit_loss_abs = current_value - buy_value
-        profit_loss_pct = (profit_loss_abs / buy_value) * 100
-        breakeven = buy_price
-        stage = f"In Profit: +{profit_loss_pct:.2f}%" if profit_loss_pct > 0 else f"At Loss: {profit_loss_pct:.2f}%"
-        sentiment = get_news_sentiment(data['news'])
-        advice = f"{inv['symbol']} {'bullish' if profit_loss_pct > 0 else 'bearish'} trend. Sentiment: {sentiment}."
-
-        results.append({
+        stock_data = fetch_stock_data(inv['symbol'])
+        current = stock_data['info'].get('currentPrice') or stock_data['info'].get('regularMarketPrice')
+        if not current or pd.isna(current):
+            current = 'N/A'
+            profit_abs = profit_pct = breakeven = 'N/A'
+        else:
+            cost = inv['buy_price'] * inv['quantity']
+            value = current * inv['quantity']
+            profit_abs = value - cost
+            profit_pct = (profit_abs / cost) * 100 if cost > 0 else 0
+            breakeven = inv['buy_price']
+        data.append({
             'symbol': inv['symbol'],
-            'current_price': f"${current_price:.2f}",
-            'profit_loss_abs': f"${profit_loss_abs:.2f}",
-            'profit_loss_pct': f"{profit_loss_pct:.2f}%",
-            'breakeven': f"${breakeven:.2f}",
-            'stage': stage,
-            'sentiment': sentiment,
-            'advice': advice
+            'current_price': current,
+            'profit_loss_abs': profit_abs,
+            'profit_loss_pct': profit_pct,
+            'breakeven': breakeven
         })
-    return pd.DataFrame(results)
+    return pd.DataFrame(data)
 
-# Prophet forecast
-def forecast_with_prophet(hist):
-    """30-day forecast using Prophet."""
-    if hist.empty or len(hist) < 10:
-        return "Not enough data"
-    df = hist.reset_index()[['Date', 'Close']].copy()
-    df.columns = ['ds', 'y']
-    df['ds'] = df['ds'].dt.tz_localize(None)
+# Forecast
+def forecast_with_prophet(history):
+    if history.empty or len(history) < 30:
+        return pd.DataFrame()
+    df = history[['Close']].reset_index().rename(columns={'Date': 'ds', 'Close': 'y'})
     m = Prophet(daily_seasonality=True)
     m.fit(df)
     future = m.make_future_dataframe(periods=30)
     forecast = m.predict(future)
-    return forecast[['ds', 'yhat']].tail(30)
+    return forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']]
 
-# Short-term prediction
-def short_term_prediction(hist):
-    """Next day prediction using Linear Regression."""
-    if len(hist) < 5:
-        return "Need more data"
-    X = np.arange(len(hist)).reshape(-1, 1)
-    y = hist['Close'].values
-    model = LinearRegression()
-    model.fit(X, y)
-    next_day = model.predict([[len(hist)]])[0]
-    return f"Next close: ${next_day:.2f}"
-
-# Send email
-def send_email(to_email, subject, body, sender_email, sender_password):
-    """Send alert via Gmail SMTP."""
-    if not sender_email or not sender_password:
-        return
-    try:
-        msg = MIMEMultipart()
-        msg['From'] = sender_email
-        msg['To'] = to_email
-        msg['Subject'] = subject
-        msg.attach(MIMEText(body, 'plain'))
-        server = smtplib.SMTP('smtp.gmail.com', 587)
-        server.starttls()
-        server.login(sender_email, sender_password)
-        server.sendmail(sender_email, to_email, msg.as_string())
-        server.quit()
-    except Exception as e:
-        print(f"Email failed: {e}")
+# Short term
+def short_term_prediction(history):
+    if history.empty:
+        return "No data."
+    recent = history['Close'].tail(5)
+    trend = "up" if recent.iloc[-1] > recent.iloc[0] else "down"
+    return f"Next day: likely {trend} (based on 5-day trend)."
 
 # Check alerts
 def check_alerts(conn, sender_email, sender_password):
-    """Background task to check and send alerts."""
+    if not sender_email or not sender_password:
+        return
     c = conn.cursor()
-    alerts = c.execute("SELECT symbol, alert_type, threshold, email FROM alerts").fetchall()
-    investments = c.execute("SELECT symbol, buy_price, quantity FROM investments").fetchall()
-    
+    alerts = c.execute("SELECT * FROM alerts").fetchall()
     for alert in alerts:
         symbol, alert_type, threshold, email = alert
-        data = fetch_stock_data(symbol)
-        current_price = data['current_price']
-        if current_price == 0:
+        stock_data = fetch_stock_data(symbol)
+        current = stock_data['info'].get('currentPrice') or stock_data['info'].get('regularMarketPrice')
+        if not current:
             continue
-
-        inv = next((i for i in investments if i[0] == symbol), None)
+        c.execute("SELECT buy_price, quantity FROM investments WHERE symbol=? AND email=?", (symbol, email))
+        inv = c.fetchone()
         if not inv:
             continue
-        buy_price = inv[1]
+        buy_price, quantity = inv
+        cost = buy_price * quantity
+        value = current * quantity
+        profit_abs = value - cost
+        profit_pct = (profit_abs / cost) * 100
 
-        profit_pct = ((current_price - buy_price) / buy_price) * 100
-        drop_pct = ((buy_price - current_price) / buy_price) * 100
-
-        triggered = False
-        body = ""
-
-        if alert_type == 'price' and current_price >= threshold:
-            triggered = True
-            body = f"{symbol} hit ${threshold:.2f}! Current: ${current_price:.2f}"
+        trigger = False
+        msg = ""
+        if alert_type == 'price' and current >= threshold:
+            trigger = True
+            msg = f"{symbol} hit target ₹{threshold}! Current: ₹{current}"
         elif alert_type == 'profit_pct' and profit_pct >= threshold:
-            triggered = True
-            body = f"{symbol} reached {threshold}% profit! Now: {profit_pct:.2f}%"
-        elif alert_type == 'drop_pct' and drop_pct >= threshold:
-            triggered = True
-            body = f"{symbol} dropped {threshold}%! Current drop: {drop_pct:.2f}%"
+            trigger = True
+            msg = f"{symbol} profit {profit_pct:.1f}% ≥ {threshold}%!"
+        elif alert_type == 'drop_pct' and profit_pct <= -threshold:
+            trigger = True
+            msg = f"{symbol} dropped {abs(profit_pct):.1f}% ≥ {threshold}%!"
 
-        if triggered:
-            send_email(email, f"StockGuardian Alert: {symbol}", body, sender_email, sender_password)
-            c.execute("DELETE FROM alerts WHERE symbol=? AND alert_type=? AND threshold=?", (symbol, alert_type, threshold))
+        if trigger:
+            send_email(email, sender_email, sender_password, "Stock Alert", msg)
+            c.execute("DELETE FROM alerts WHERE symbol=? AND alert_type=? AND email=?", (symbol, alert_type, email))
             conn.commit()
+
+# Send email
+def send_email(to_email, sender_email, sender_password, subject, body):
+    try:
+        msg = MIMEText(body)
+        msg['Subject'] = subject
+        msg['From'] = sender_email
+        msg['To'] = to_email
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+            server.login(sender_email, sender_password)
+            server.send_message(msg)
+    except:
+        pass
