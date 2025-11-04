@@ -98,13 +98,19 @@ with tab1:
     db_investments = c.execute("SELECT symbol, buy_price, quantity, purchase_date, platform FROM investments WHERE email=?", (st.session_state.email,)).fetchall()
     st.session_state.investments = [{'symbol': row[0], 'buy_price': row[1], 'quantity': row[2], 'purchase_date': row[3], 'platform': row[4]} for row in db_investments]
 
-    if st.session_state.investments:
-        df = calculate_profit_loss(st.session_state.investments)
-        st.dataframe(df.style.format({
-            'current_price': '${:.2f}',
-            'profit_loss_abs': '${:.2f}',
-            'profit_loss_pct': '{:.2f}%'
-        }), use_container_width=True)
+            # Safe formatting: handle N/A
+        def safe_format(val, fmt):
+            try:
+                return fmt.format(float(val))
+            except:
+                return str(val)
+
+        styled_df = df.copy()
+        styled_df['current_price'] = styled_df['current_price'].apply(lambda x: safe_format(x, '${:.2f}'))
+        styled_df['profit_loss_abs'] = styled_df['profit_loss_abs'].apply(lambda x: safe_format(x, '${:.2f}'))
+        styled_df['profit_loss_pct'] = styled_df['profit_loss_pct'].apply(lambda x: safe_format(x, '{:.2f}%'))
+        
+        st.dataframe(styled_df, use_container_width=True)
 
         for inv in st.session_state.investments:
             with st.expander(f"Chart & Forecast: {inv['symbol']}"):
