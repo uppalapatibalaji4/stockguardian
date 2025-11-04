@@ -1,4 +1,4 @@
-# utils.py - FINAL: No tz_localize error + Charts + TBT + News
+# utils.py - StockGuardian Core (FINAL: Charts, TBT, News, No tz_localize error)
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -26,7 +26,7 @@ def setup_db():
     return conn
 
 # ========================
-# FETCH STOCK DATA (FIXED TZ ERROR)
+# FETCH STOCK DATA (FIXED: No tz_localize error)
 # ========================
 def fetch_stock_data(symbol):
     symbol = symbol.strip().upper()
@@ -35,7 +35,7 @@ def fetch_stock_data(symbol):
             ticker = yf.Ticker(symbol)
             hist = ticker.history(period="1y", interval="1d", auto_adjust=True, prepost=True)
             
-            # FIX: Only tz_localize if timezone-aware
+            # FIX: Only convert if timezone-aware
             if hist.index.tz is not None:
                 hist.index = hist.index.tz_localize(None)
             
@@ -60,7 +60,7 @@ def fetch_stock_data(symbol):
                 st.warning(f"Failed to fetch {symbol}: {e}")
             time.sleep(2)
 
-    # Fallback
+    # Fallback (offline/demo)
     return {
         'current_price': 3058.00,
         'history': pd.DataFrame(),
@@ -75,8 +75,10 @@ def get_news_sentiment(news):
     if not news:
         return "Neutral"
     titles = [item.get('title', '') for item in news if item.get('title')]
+    if not titles:
+        return "Neutral"
     sentiments = [TextBlob(title).sentiment.polarity for title in titles]
-    avg = np.mean(sentiments) if sentiments else 0
+    avg = np.mean(sentiments)
     return "Positive" if avg > 0.1 else "Negative" if avg < -0.1 else "Neutral"
 
 # ========================
@@ -93,12 +95,12 @@ def calculate_profit_loss(investments):
             results.append({
                 'symbol': symbol,
                 'current_price': 'N/A',
-                'profit_loss_abs': 'N/A',
+                'profit_loss_abs': 'N to fetch',
                 'profit_loss_pct': 'N/A',
                 'breakeven': f"₹{inv['buy_price']:.2f}",
                 'stage': 'No Data',
                 'sentiment': 'N/A',
-                'advice': 'Data unavailable.'
+                'advice': 'Check internet.'
             })
             continue
 
