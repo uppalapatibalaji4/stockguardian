@@ -1,5 +1,6 @@
 # app.py: Main Streamlit app for StockGuardian
 import streamlit as st
+import pandas as pd   # REQUIRED FOR pd.isna()
 from utils import *
 import threading
 import schedule
@@ -18,7 +19,7 @@ if 'sender_email' not in st.session_state:
 if 'sender_password' not in st.session_state:
     st.session_state.sender_password = os.getenv('EMAIL_PASSWORD', '')
 
-# Load AI bot model (distilgpt2)
+# Load AI bot model
 @st.cache_resource
 def load_bot():
     return pipeline('text-generation', model='distilgpt2')
@@ -26,7 +27,6 @@ def load_bot():
 generator = load_bot()
 
 def generate_bot_response(query, context):
-    """Generate response with model."""
     prompt = f"Finance expert: User investments: {context}. Question: {query}. Answer concisely:"
     try:
         response = generator(prompt, max_length=100, num_return_sequences=1)[0]['generated_text']
@@ -50,7 +50,7 @@ if not hasattr(st, "scheduler_started"):
 st.title("StockGuardian: Your Personal Stock Agent")
 st.warning("API Limits: yfinance may throttle requests. Use sparingly. Emails hashed for security.")
 
-# Setup: Email
+# Setup
 if not st.session_state.email:
     st.subheader("Setup")
     email = st.text_input("Enter your email for alerts:")
@@ -65,7 +65,6 @@ if not st.session_state.email:
         else:
             st.error("Please fill all fields correctly.")
 else:
-    # Tabs
     tab1, tab2, tab3 = st.tabs(["Dashboard", "Alerts", "Chat Bot"])
 
     with tab1:
@@ -97,16 +96,15 @@ else:
         db_investments = c.execute("SELECT symbol, buy_price, quantity, purchase_date, platform FROM investments WHERE email=?", (st.session_state.email,)).fetchall()
         st.session_state.investments = [{'symbol': row[0], 'buy_price': row[1], 'quantity': row[2], 'purchase_date': row[3], 'platform': row[4]} for row in db_investments]
 
-        # DISPLAY
         if st.session_state.investments:
             df = calculate_profit_loss(st.session_state.investments)
 
             # SAFE FORMATTING
             def safe_format(val, fmt):
                 try:
-                    if isinstance(val, (int, float)) and not pd.isna(val):
-                        return fmt.format(float(val))
-                    return str(val)
+                    if pd.isna(val) or val in ['N/A', 'Invalid', 'No Data', 'Error']:
+                        return str(val)
+                    return fmt.format(float(val))
                 except:
                     return str(val)
 
@@ -122,7 +120,6 @@ else:
 
             st.dataframe(display_df, use_container_width=True)
 
-            # Charts
             for inv in st.session_state.investments:
                 with st.expander(f"Chart & Forecast: {inv['symbol']}"):
                     data = fetch_stock_data(inv['symbol'])
