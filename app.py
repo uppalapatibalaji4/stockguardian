@@ -1,11 +1,11 @@
 # app.py: Main Streamlit app for StockGuardian
 import streamlit as st
-import pandas as pd   # REQUIRED FOR pd.isna()
+import pandas as pd
 from utils import *
 import threading
 import schedule
 import time
-from transformers import pipeline
+import requests  # FOR GEMINI
 import os
 
 # Initialize DB and session state
@@ -19,20 +19,21 @@ if 'sender_email' not in st.session_state:
 if 'sender_password' not in st.session_state:
     st.session_state.sender_password = os.getenv('EMAIL_PASSWORD', '')
 
-# Load AI bot model
-@st.cache_resource
-def load_bot():
-    return pipeline('text-generation', model='distilgpt2')
-
-generator = load_bot()
-
-def generate_bot_response(query, context):
-    prompt = f"Finance expert: User investments: {context}. Question: {query}. Answer concisely:"
+# FREE GEMINI AI (NO distilgpt2!)
+def gemini_chat(query, context=""):
     try:
-        response = generator(prompt, max_length=100, num_return_sequences=1)[0]['generated_text']
-        return response.split("Answer concisely:")[-1].strip()
-    except:
-        return "I'm thinking... Try again."
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={st.secrets['GEMINI_API_KEY']}"
+        data = {
+            "contents": [{
+                "parts": [{
+                    "text": f"You are a stock expert. User holds: {context}. Question: {query}. Reply in 2-3 sentences, be sharp and confident."
+                }]
+            }]
+        }
+        r = requests.post(url, json=data, timeout=15)
+        return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+    except Exception as e:
+        return "Gemini is thinking... Try again."
 
 # Background scheduler
 def run_scheduler():
@@ -162,13 +163,13 @@ else:
             st.write("Add investments first.")
 
     with tab3:
-        st.subheader("AI Chat Bot")
-        context = ", ".join([f"{inv['symbol']} (${inv['buy_price']} x {inv['quantity']})" for inv in st.session_state.investments])
-        user_query = st.chat_input("Ask about your stocks (e.g., 'Should I sell WEBSOL?')")
+        st.subheader("AI Chat Bot (Gemini 1.5 Flash - FREE)")
+        context = ", ".join([f"{inv['symbol']} @ ₹{inv['buy_price']} × {inv['quantity']}" for inv in st.session_state.investments])
+        user_query = st.chat_input("Ask anything (e.g., 'Buy TCS.NS now?')")
         if user_query:
             with st.chat_message("user"):
                 st.write(user_query)
             with st.chat_message("assistant"):
-                with st.spinner("Thinking..."):
-                    response = generate_bot_response(user_query, context)
+                with st.spinner("Gemini thinking..."):
+                    response = gemini_chat(user_query, context)
                 st.write(response)
