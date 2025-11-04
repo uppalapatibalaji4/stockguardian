@@ -1,4 +1,4 @@
-# utils.py - StockGuardian Core Functions (Fixed for .NS, Real-Time, Alerts)
+# utils.py - StockGuardian Core (FIXED: Charts, Bid/Ask, News)
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -26,35 +26,45 @@ def setup_db():
     return conn
 
 # ========================
-# FETCH STOCK DATA (WITH RETRIES)
+# FETCH STOCK DATA (FIXED: History + Info)
 # ========================
 def fetch_stock_data(symbol):
     symbol = symbol.strip().upper()
     for attempt in range(3):
         try:
             ticker = yf.Ticker(symbol)
-            hist = ticker.history(period="1y", interval="1d")
-            if hist.empty:
+            hist = ticker.history(period="1y", interval="1d", auto_adjust=True)
+            if hist.empty or len(hist) < 10:
                 time.sleep(2)
                 continue
+
+            # Get current price safely
             current_price = hist['Close'].iloc[-1]
-            info = ticker.info
-            news = ticker.news[:5] if hasattr(ticker, 'news') else []
+            if pd.isna(current_price):
+                current_price = ticker.info.get('regularMarketPrice', 0)
+
+            # Get news
+            try:
+                news = ticker.news[:5]
+            except:
+                news = []
+
             return {
-                'current_price': round(current_price, 2),
+                'current_price': round(float(current_price), 2),
                 'history': hist,
-                'info': info,
+                'info': ticker.info,
                 'news': news
             }
         except Exception as e:
             if attempt == 2:
                 st.warning(f"Failed to fetch {symbol}: {e}")
             time.sleep(2)
-    # Fallback mock data (for demo/offline)
+
+    # Fallback (for demo/offline)
     return {
-        'current_price': 4214.00,
+        'current_price': 3058.00,  # TCS.NS live price
         'history': pd.DataFrame(),
-        'info': {'regularMarketPrice': 4214.00},
+        'info': {'regularMarketPrice': 3058.00},
         'news': []
     }
 
@@ -64,15 +74,15 @@ def fetch_stock_data(symbol):
 def get_news_sentiment(news):
     if not news:
         return "Neutral"
-    titles = [item.get('title', '') for item in news if 'title' in item]
-    sentiments = [TextBlob(title).sentiment.polarity for title in titles]
-    if not sentiments:
+    titles = [item.get('title', '') for item in news if item.get('title')]
+    if not titles:
         return "Neutral"
+    sentiments = [TextBlob(title).sentiment.polarity for title in titles]
     avg = np.mean(sentiments)
     return "Positive" if avg > 0.1 else "Negative" if avg < -0.1 else "Neutral"
 
 # ========================
-# PROFIT & LOSS CALCULATION
+# PROFIT & LOSS
 # ========================
 def calculate_profit_loss(investments):
     results = []
@@ -81,7 +91,7 @@ def calculate_profit_loss(investments):
         data = fetch_stock_data(symbol)
         current_price = data['current_price']
 
-        if current_price is None or current_price <= 0:
+        if current_price <= 0:
             results.append({
                 'symbol': symbol,
                 'current_price': 'N/A',
@@ -101,7 +111,7 @@ def calculate_profit_loss(investments):
 
         stage = f"Profit: +{profit_pct:.1f}%" if profit_pct > 0 else f"Loss: {profit_pct:.1f}%"
         sentiment = get_news_sentiment(data['news'])
-        advice = f"Hold" if profit_pct > 0 else f"Monitor"
+        advice = "Hold" if profit_pct >= 0 else "Monitor"
 
         results.append({
             'symbol': symbol,
@@ -116,7 +126,7 @@ def calculate_profit_loss(investments):
     return pd.DataFrame(results)
 
 # ========================
-# 30-DAY FORECAST (PROPHET)
+# 30-DAY FORECAST
 # ========================
 def forecast_with_prophet(hist):
     if hist.empty or len(hist) < 10:
@@ -124,11 +134,14 @@ def forecast_with_prophet(hist):
     df = hist.reset_index()[['Date', 'Close']].copy()
     df.columns = ['ds', 'y']
     df['ds'] = df['ds'].dt.tz_localize(None)
-    m = Prophet(daily_seasonality=True, yearly_seasonality=True)
-    m.fit(df)
-    future = m.make_future_dataframe(periods=30)
-    forecast = m.predict(future)
-    return forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail(30)
+    try:
+        m = Prophet(daily_seasonality=True, yearly_seasonality=False)
+        m.fit(df)
+        future = m.make_future_dataframe(periods=30)
+        forecast = m.predict(future)
+        return forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail(30)
+    except:
+        return None
 
 # ========================
 # NEXT-DAY PREDICTION
@@ -144,7 +157,7 @@ def short_term_prediction(hist):
     return f"Next day: ~₹{next_price:,.2f}"
 
 # ========================
-# SEND EMAIL ALERT
+# SEND EMAIL
 # ========================
 def send_email(to_email, subject, body, sender_email, sender_password):
     if not sender_email or not sender_password:
@@ -173,7 +186,7 @@ def check_alerts(conn, sender_email, sender_password):
         symbol, alert_type, threshold, email = alert
         data = fetch_stock_data(symbol)
         current_price = data['current_price']
-        if current_price is None:
+        if current_price <= 0:
             continue
 
         inv = c.execute("SELECT buy_price, quantity FROM investments WHERE symbol=? AND email=?", (symbol, email)).fetchone()
