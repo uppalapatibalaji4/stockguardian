@@ -1,81 +1,148 @@
-# utils.py - 100% WORKING FOR .NS STOCKS (NOV 2025)
-import yfinance as yf
-import pandas as pd
-from prophet import Prophet
-import sqlite3
+# app.py: Main Streamlit app for StockGuardian
 import streamlit as st
-import smtplib
-from email.mime.text import MIMEText
+import pandas as pd
+from utils import *
+import threading
+import schedule
+import time
+import requests
+import os
 
-def setup_db():
-    conn = sqlite3.connect('investments.db', check_same_thread=False)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS investments
-                 (symbol TEXT, buy_price REAL, quantity INTEGER, purchase_date TEXT, platform TEXT, email TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS alerts
-                 (symbol TEXT, alert_type TEXT, threshold REAL, email TEXT)''')
-    conn.commit()
-    return conn
+# Initialize DB and session state
+conn = setup_db()
+if 'investments' not in st.session_state:
+    st.session_state.investments = []
+if 'email' not in st.session_state:
+    st.session_state.email = ""
+if 'sender_email' not in st.session_state:
+    st.session_state.sender_email = os.getenv('EMAIL_SENDER', '')
+if 'sender_password' not in st.session_state:
+    st.session_state.sender_password = os.getenv('EMAIL_PASSWORD', '')
 
-def fetch_stock_data(symbol):
+# GEMINI AI
+def gemini_chat(query, context=""):
     try:
-        # FORCE .NS suffix
-        symbol = symbol.upper()
-        if not symbol.endswith('.NS'):
-            symbol += '.NS'
-        ticker = yf.Ticker(symbol)
-        info = ticker.info
-        history = ticker.history(period="60d")
-        current_price = info.get('currentPrice') or info.get('regularMarketPrice') or info.get('previousClose')
-        return {
-            'history': history,
-            'current_price': current_price,
-            'info': info
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={st.secrets['GEMINI_API_KEY']}"
+        data = {
+            "contents": [{
+                "parts": [{
+                    "text": f"You are a top Indian stock analyst in 2025. User holds: {context}. Current date: November 2025. Question: {query}. Give a direct, data-backed answer in 2 sentences. Use real market trends."
+                }]
+            }]
         }
-    except Exception as e:
-        st.error(f"Error fetching {symbol}: {e}")
-        return {'history': pd.DataFrame(), 'current_price': None, 'info': {}}
+        r = requests.post(url, json=data, timeout=15)
+        return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+    except:
+        return "Gemini is thinking... Try again."
 
-def calculate_profit_loss(investments):
-    data = []
-    for inv in investments:
-        result = fetch_stock_data(inv['symbol'])
-        current = result['current_price']
-        if current is None:
-            current = profit_abs = profit_pct = 'N/A'
+# Background scheduler
+def run_scheduler():
+    while True:
+        schedule.run_pending()
+        time.sleep(60)
+
+schedule.every(10).minutes.do(check_alerts, conn, st.session_state.sender_email, st.session_state.sender_password)
+if not hasattr(st, "scheduler_started"):
+    scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
+    scheduler_thread.start()
+    st.scheduler_started = True
+
+# UI
+st.set_page_config(page_title="StockGuardian", page_icon="Chart Increasing", layout="wide")
+st.title("StockGuardian: Your Personal Stock Agent")
+st.warning("API Limits: yfinance may throttle requests. Use sparingly.")
+
+# Setup
+if not st.session_state.email:
+    st.subheader("Setup")
+    email = st.text_input("Enter your email for alerts:")
+    sender_email = st.text_input("Sender Gmail (for SMTP):", value=st.session_state.sender_email)
+    sender_password = st.text_input("Gmail App Password:", type="password", value=st.session_state.sender_password)
+    if st.button("Save Setup"):
+        if "@" in email and sender_email and sender_password:
+            st.session_state.email = email
+            st.session_state.sender_email = sender_email
+            st.session_state.sender_password = sender_password
+            st.success("Setup saved! Proceed to tabs.")
         else:
-            cost = inv['buy_price'] * inv['quantity']
-            value = current * inv['quantity']
-            profit_abs = value - cost
-            profit_pct = (profit_abs / cost) * 100 if cost > 0 else 0
-        data.append({
-            'symbol': inv['symbol'],
-            'current_price': f"₹{current:,.2f}" if current != 'N/A' else 'N/A',
-            'profit_loss_abs': f"₹{profit_abs:,.2f}" if profit_abs != 'N/A' else 'N/A',
-            'profit_loss_pct': f"{profit_pct:.2f}%" if profit_pct != 'N/A' else 'N/A',
-            'breakeven': f"₹{inv['buy_price']:,.2f}"
-        })
-    return pd.DataFrame(data)
+            st.error("Please fill all fields correctly.")
+else:
+    tab1, tab2, tab3 = st.tabs(["Dashboard", "Alerts", "Chat Bot"])
 
-def forecast_with_prophet(history):
-    if history.empty or len(history) < 10:
-        return None
-    df = history[['Close']].reset_index().rename(columns={'Date': 'ds', 'Close': 'y'})
-    m = Prophet()
-    m.fit(df)
-    future = m.make_future_dataframe(periods=30)
-    forecast = m.predict(future)
-    return forecast[['ds', 'yhat']]
+    with tab1:
+        st.subheader("Investment Query and Research")
+        col1, col2 = st.columns(2)
+        with col1:
+            symbol = st.text_input("Stock Symbol:", key="sym", placeholder="TCS.NS")
+            buy_price = st.number_input("Buy Price:", min_value=0.0, key="price")
+            quantity = st.number_input("Quantity:", min_value=1, key="qty")
+        with col2:
+            purchase_date = st.date_input("Purchase Date:", key="date")
+            platform = st.text_input("Platform:", key="plat", placeholder="Upstox")
 
-def short_term_prediction(history):
-    if history.empty:
-        return "No data available."
-    close = history['Close']
-    change = close.pct_change().tail(5).mean()
-    return f"Next day: {'up' if change > 0 else 'down'} (~{abs(change)*100:.1f}% trend)"
+        if st.button("Add Investment"):
+            if symbol and buy_price > 0 and quantity > 0:
+                c = conn.cursor()
+                c.execute("INSERT INTO investments VALUES (?, ?, ?, ?, ?, ?)",
+                          (symbol.upper(), buy_price, quantity, str(purchase_date), platform, st.session_state.email))
+                conn.commit()
+                st.success(f"Added {symbol.upper()}!")
+                st.rerun()
+            else:
+                st.error("Fill all fields.")
 
-def check_alerts(conn, sender_email, sender_password):
-    pass  # Keep simple for now
+        # Load from DB
+        c = conn.cursor()
+        db_investments = c.execute("SELECT symbol, buy_price, quantity, purchase_date, platform FROM investments WHERE email=?", (st.session_state.email,)).fetchall()
+        st.session_state.investments = [{'symbol': row[0], 'buy_price': row[1], 'quantity': row[2], 'purchase_date': row[3], 'platform': row[4]} for row in db_investments]
 
-def send_email(to, sender, pwd, sub, body):
-    pass
+        if st.session_state.investments:
+            df = calculate_profit_loss(st.session_state.investments)
+            if not df.empty:
+                st.dataframe(df, use_container_width=True)
+
+            for inv in st.session_state.investments:
+                with st.expander(f"Chart & Forecast: {inv['symbol']}"):
+                    data = fetch_stock_data(inv['symbol'])
+                    if not data['history'].empty:
+                        st.line_chart(data['history']['Close'].tail(60), use_container_width=True)
+                        forecast = forecast_with_prophet(data['history'])
+                        if forecast is not None and not forecast.empty:
+                            st.write("30-Day Forecast:")
+                            st.line_chart(forecast.set_index('ds')['yhat'])
+                        st.write(short_term_prediction(data['history']))
+                    else:
+                        st.write("No historical data.")
+        else:
+            st.info("No investments yet. Add one above!")
+
+    with tab2:
+        st.subheader("Notification Setup")
+        if st.session_state.investments:
+            symbol = st.selectbox("Select Stock:", [inv['symbol'] for inv in st.session_state.investments])
+            alert_type = st.selectbox("Alert Type:", ['Target Price', 'Profit %', 'Drop %'])
+            threshold = st.number_input("Threshold:", min_value=0.0)
+            if st.button("Set Alert"):
+                db_type = 'price' if alert_type == 'Target Price' else 'profit_pct' if alert_type == 'Profit %' else 'drop_pct'
+                c = conn.cursor()
+                c.execute("INSERT INTO alerts VALUES (?, ?, ?, ?)", (symbol, db_type, threshold, st.session_state.email))
+                conn.commit()
+                st.success(f"Alert set!")
+                st.rerun()
+            alerts = c.execute("SELECT symbol, alert_type, threshold FROM alerts WHERE email=?", (st.session_state.email,)).fetchall()
+            if alerts:
+                alert_df = pd.DataFrame(alerts, columns=['Stock', 'Type', 'Threshold'])
+                alert_df['Type'] = alert_df['Type'].map({'price': 'Target Price', 'profit_pct': 'Profit %', 'drop_pct': 'Drop %'})
+                st.table(alert_df)
+        else:
+            st.info("Add investments first.")
+
+    with tab3:
+        st.subheader("AI Chat Bot (Gemini 1.5 Flash - FREE)")
+        context = ", ".join([f"{inv['symbol']} (bought ₹{inv['buy_price']}, qty: {inv['quantity']})" for inv in st.session_state.investments])
+        user_query = st.chat_input("Ask anything (e.g., 'Sell TCS.NS?')")
+        if user_query:
+            with st.chat_message("user"): st.write(user_query)
+            with st.chat_message("assistant"):
+                with st.spinner("Gemini thinking..."):
+                    st.write(gemini_chat(user_query, context))
