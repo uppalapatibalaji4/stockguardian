@@ -4,13 +4,13 @@ import pandas as pd
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from datetime import datetime
+from datetime import datetime, time as dt_time
 from prophet import Prophet
 import plotly.express as px
 import matplotlib.pyplot as plt
+import mplfinance as mpf
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from twilio.rest import Client
-import time
 
 # ========================================
 # 1. INVESTMENTS
@@ -26,9 +26,9 @@ def save_investments(df):
     df.to_csv('investments.csv', index=False)
 
 # ========================================
-# 2. EMAIL ALERT
+# 2. EMAIL ALERT (REAL PRICE)
 # ========================================
-def send_email_alert(ticker, price, alert_type):
+def send_email_alert(ticker, current_price, alert_type):
     try:
         sender = st.session_state.get("sender_email", "")
         password = st.session_state.get("app_password", "")
@@ -40,7 +40,7 @@ def send_email_alert(ticker, price, alert_type):
         msg['From'] = sender
         msg['To'] = user_email
         msg['Subject'] = f"StockGuardian Alert: {ticker}"
-        body = f"{ticker} {alert_type} at ₹{price:.2f} on {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        body = f"{ticker} {alert_type} at ₹{current_price:.2f} on {datetime.now().strftime('%Y-%m-%d %H:%M')}"
         msg.attach(MIMEText(body, 'plain'))
 
         server = smtplib.SMTP('smtp.gmail.com', 587)
@@ -49,13 +49,14 @@ def send_email_alert(ticker, price, alert_type):
         server.sendmail(sender, user_email, msg.as_string())
         server.quit()
         return True
-    except:
+    except Exception as e:
+        st.error(f"Email failed: {e}")
         return False
 
 # ========================================
 # 3. WHATSAPP ALERT
 # ========================================
-def send_whatsapp_alert(ticker, price, alert_type):
+def send_whatsapp_alert(ticker, current_price, alert_type):
     try:
         account_sid = st.secrets.get("TWILIO_SID", "")
         auth_token = st.secrets.get("TWILIO_TOKEN", "")
@@ -66,30 +67,66 @@ def send_whatsapp_alert(ticker, price, alert_type):
 
         client = Client(account_sid, auth_token)
         message = client.messages.create(
-            body=f"StockGuardian Alert: {ticker} {alert_type} at ₹{price:.2f}",
+            body=f"{ticker} {alert_type} at ₹{current_price:.2f}",
             from_=f"whatsapp:{from_number}",
             to=f"whatsapp:{to_number}"
         )
         return True
-    except:
+    except Exception as e:
+        st.error(f"WhatsApp failed: {e}")
         return False
 
 # ========================================
-# 4. P&L & LIVE PRICE
+# 4. LIVE DATA (UPSTOX STYLE)
 # ========================================
-def get_pnl(ticker, buy_price, qty):
+def get_live_data(ticker):
     try:
-        data = yf.download(ticker, period='2d', progress=False)
-        if data.empty:
+        stock = yf.Ticker(ticker)
+        info = stock.info
+        hist = stock.history(period="1d")
+
+        if hist.empty:
             return None, "No data"
-        current_price = data['Close'].iloc[-1]
-        pnl_pct = ((current_price - buy_price) / buy_price) * 100
-        return current_price, pnl_pct
-    except:
-        return None, "Invalid ticker"
+
+        current_price = info.get('regularMarketPrice') or hist['Close'].iloc[-1]
+        open_price = info.get('regularMarketOpen', hist['Open'].iloc[0])
+        high_price = info.get('regularMarketDayHigh', hist['High'].max())
+        low_price = info.get('regularMarketDayLow', hist['Low'].min())
+        volume = info.get('regularMarketVolume', hist['Volume'].sum())
+        prev_close = info.get('regularMarketPreviousClose', hist['Close'].iloc[0])
+
+        now = datetime.now().time()
+        market_open = dt_time(9, 15)
+        market_close = dt_time(15, 30)
+        is_open = market_open <= now <= market_close
+
+        return {
+            'current': current_price,
+            'open': open_price,
+            'high': high_price,
+            'low': low_price,
+            'volume': volume,
+            'prev_close': prev_close,
+            'change_pct': ((current_price - prev_close) / prev_close) * 100,
+            'market_open': is_open,
+            'hist': hist
+        }, None
+    except Exception as e:
+        return None, "Invalid ticker or market closed"
 
 # ========================================
-# 5. SENTIMENT
+# 5. P&L
+# ========================================
+def get_pnl(ticker, buy_price):
+    data, error = get_live_data(ticker)
+    if error:
+        return None, error
+    current = data['current']
+    pnl_pct = ((current - buy_price) / buy_price) * 100
+    return current, pnl_pct
+
+# ========================================
+# 6. SENTIMENT
 # ========================================
 @st.cache_resource
 def get_sentiment_analyzer():
@@ -111,42 +148,34 @@ def get_sentiment_advice(ticker):
         return "Neutral", "Hold"
 
 # ========================================
-# 6. FORECAST CHART
+# 7. CANDLESTICK CHART
 # ========================================
-def draw_forecast_chart(ticker):
+def draw_trading_chart(ticker):
     try:
-        data = yf.download(ticker, period='1y', progress=False)
-        if len(data) < 100:
-            raise ValueError("Not enough data")
-        data = data.reset_index()
-        data['ds'] = data['Date']
-        data['y'] = data['Close']
-        m = Prophet()
-        m.fit(data[['ds', 'y']])
-        future = m.make_future_dataframe(periods=30)
-        forecast = m.predict(future)
-        fig = px.line(forecast.tail(60), x='ds', y='yhat', title=f"{ticker} 30-Day Forecast")
-        fig.add_scatter(x=data['ds'], y=data['y'], mode='lines', name='Actual', line=dict(color='blue'))
-        return fig
+        hist = yf.download(ticker, period='5d', interval='5m', progress=False)
+        if hist.empty or len(hist) < 10:
+            fig, ax = plt.subplots()
+            ax.text(0.5, 0.5, 'No trading data', ha='center')
+            ax.axis('off')
+            return fig
+
+        mpf.plot(hist, type='candle', style='charles', volume=True,
+                 title=f"{ticker} Live Chart", figsize=(10, 6), returnfig=True)
+        return plt.gcf()
     except:
         fig, ax = plt.subplots()
-        ax.text(0.5, 0.5, 'No historical data.', ha='center', va='center', fontsize=14)
-        ax.set_title(f"Chart: {ticker}")
+        ax.text(0.5, 0.5, 'Chart unavailable', ha='center')
         ax.axis('off')
         return fig
 
 # ========================================
-# 7. CHAT BOT
+# 8. TEST ALERT
 # ========================================
-def chat_bot_response(query, investments):
-    query = query.lower()
-    if "bye" in query:
-        return "Goodbye! Stay profitable"
-    if investments.empty:
-        return "Add a stock first!"
-    ticker = investments.iloc[0]['ticker']
-    current, _ = get_pnl(ticker, 0, 0)
-    if current is None:
-        return "Market closed or invalid ticker."
-    sentiment, advice = get_sentiment_advice(ticker)
-    return f"{ticker}: ₹{current:.2f} | Sentiment: {sentiment} | Advice: {advice}"
+def test_alert(ticker):
+    data, error = get_live_data(ticker)
+    if error:
+        st.error(error)
+        return
+    price = data['current']
+    send_email_alert(ticker, price, "TEST")
+    send_whatsapp_alert(ticker, price, "TEST")
