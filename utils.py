@@ -10,104 +10,125 @@ from transformers import pipeline
 import plotly.express as px
 import matplotlib.pyplot as plt
 
-# Load investments
+# ========================================
+# 1. INVESTMENTS
+# ========================================
 @st.cache_data(ttl=300)
 def load_investments():
     try:
         return pd.read_csv('investments.csv')
-    except:
+    except FileNotFoundError:
         return pd.DataFrame(columns=['ticker', 'buy_price', 'qty', 'date', 'platform'])
 
 def save_investments(df):
     df.to_csv('investments.csv', index=False)
 
-# Email setup & send
-def setup_email():
-    with st.form("email_setup"):
-        user_email = st.text_input("Enter your email for alerts:")
-        sender_email = st.text_input("Sender Gmail (SMTP):")
-        app_password = st.text_input("Gmail App Password:", type="password")
-        submitted = st.form_submit_button("Save Setup")
-        if submitted:
-            st.session_state.user_email = user_email
-            st.secrets["GMAIL_USER"] = sender_email  # Save to secrets
-            st.secrets["GMAIL_APP_PASSWORD"] = app_password
-            st.success("Setup saved! Alerts enabled.")
-            st.rerun()
-
+# ========================================
+# 2. EMAIL SETUP & SEND
+# ========================================
 def send_alert_email(ticker, price, alert_type):
     try:
-        sender = st.secrets["GMAIL_USER"]
-        password = st.secrets["GMAIL_APP_PASSWORD"]
+        sender = st.session_state.get("sender_email", "")
+        password = st.session_state.get("app_password", "")
         user_email = st.session_state.get("user_email", "")
-        if not user_email:
+        if not all([sender, password, user_email]):
             return False
+
         msg = MIMEMultipart()
         msg['From'] = sender
         msg['To'] = user_email
         msg['Subject'] = f"StockGuardian Alert: {ticker}"
         body = f"{ticker} {alert_type} at ₹{price:.2f}"
         msg.attach(MIMEText(body, 'plain'))
+
         server = smtplib.SMTP('smtp.gmail.com', 587)
         server.starttls()
         server.login(sender, password)
         server.sendmail(sender, user_email, msg.as_string())
         server.quit()
         return True
-    except:
+    except Exception as e:
+        st.error(f"Email failed: {e}")
         return False
 
-# Dashboard metrics & chart
+# ========================================
+# 3. P&L & PRICE
+# ========================================
 def get_pnl(ticker, buy_price, qty):
     try:
-        data = yf.download(ticker, period='1d')
+        data = yf.download(ticker, period='1d', progress=False)
         current_price = data['Close'].iloc[-1]
-        pnl = (current_price - buy_price) * qty
-        pnl_pct = (pnl / (buy_price * qty)) * 100
+        pnl_pct = ((current_price - buy_price) / buy_price) * 100
         return current_price, pnl_pct
     except:
-        return buy_price, 0
+        return buy_price, 0.0
+
+# ========================================
+# 4. SENTIMENT & ADVICE
+# ========================================
+@st.cache_resource
+def get_sentiment_pipeline():
+    return pipeline("sentiment-analysis", model="ProsusAI/finbert")
 
 def get_sentiment_advice(ticker):
-    sentiment_pipeline = pipeline("sentiment-analysis", model="ProsusAI/finbert")
     try:
+        pipeline = get_sentiment_pipeline()
         news = yf.Ticker(ticker).news[:3]
-        scores = [sentiment_pipeline(n['title'])[0] for n in news]
-        avg_score = sum(s['score'] for s in scores if s['label'] == 'positive') / len(scores)
-        if avg_score > 0.5:
+        scores = []
+        for item in news:
+            result = pipeline(item['title'])[0]
+            score = result['score'] if result['label'] == 'positive' else -result['score']
+            scores.append(score)
+        avg = sum(scores) / len(scores) if scores else 0
+        if avg > 0.3:
             return "Positive", "Buy"
-        elif avg_score < -0.5:
+        elif avg < -0.3:
             return "Negative", "Sell"
         else:
             return "Neutral", "Hold"
     except:
         return "Neutral", "Hold"
 
+# ========================================
+# 5. FORECAST CHART
+# ========================================
 def draw_forecast_chart(ticker):
     try:
-        data = yf.download(ticker, period='1y')
+        data = yf.download(ticker, period='1y', progress=False)
+        if data.empty or len(data) < 100:
+            raise ValueError("Not enough data")
         data = data.reset_index()
         data['ds'] = data['Date']
         data['y'] = data['Close']
-        m = Prophet()
+        m = Prophet(yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=False)
         m.fit(data[['ds', 'y']])
         future = m.make_future_dataframe(periods=30)
         forecast = m.predict(future)
-        fig = px.line(forecast.tail(30), x='ds', y='yhat', title=f"{ticker} 30-Day Forecast")
+        fig = px.line(forecast.tail(60), x='ds', y='yhat', title=f"{ticker} 30-Day Forecast")
+        fig.add_scatter(x=data['ds'], y=data['y'], mode='lines', name='Actual')
         return fig
-    except:
+    except Exception as e:
         fig, ax = plt.subplots()
-        ax.text(0.5, 0.5, 'No historical data.', ha='center')
-        plt.title(f"Chart & Forecast: {ticker}")
+        ax.text(0.5, 0.5, 'No historical data.', ha='center', va='center', fontsize=12)
+        ax.set_title(f"Chart & Forecast: {ticker}")
+        ax.axis('off')
         return fig
 
-# Chat bot responses (simple AI)
+# ========================================
+# 6. CHAT BOT RESPONSE
+# ========================================
 def chat_bot_response(query, investments):
-    if "tcs" in query.lower() or "tcs.ns" in query.lower():
-        current, pct = get_pnl('TCS.NS', investments['buy_price'].iloc[0] if not investments.empty else 4000, 1)
-        sentiment, advice = get_sentiment_advice('TCS.NS')
-        return f"TCS.NS is at ₹{current:.2f} (Profit {pct:+.1f}%). Sentiment: {sentiment}. Advice: {advice}."
-    elif "bye" in query.lower():
-        return "Bye! Check back for updates."
-    else:
-        return "Ask about your stocks (e.g., 'How's TCS.NS?')."
+    query = query.lower()
+    if "bye" in query:
+        return "Bye! Stay profitable"
+    if "tcs" in query or "tcs.ns" in query:
+        if not investments.empty and investments.iloc[0]['ticker'] == "TCS.NS":
+            current, pct = get_pnl("TCS.NS", investments.iloc[0]['buy_price'], 1)
+            sentiment, advice = get_sentiment_advice("TCS.NS")
+            return f"TCS.NS: ₹{current:.2f} | Profit: {pct:+.1f}% | Sentiment: {sentiment} | Advice: {advice}"
+        else:
+            return "Add TCS.NS to track it!"
+    if "forecast" in query:
+        ticker = investments.iloc[0]['ticker'] if not investments.empty else "TCS.NS"
+        return f"Generating 30-day forecast for {ticker}..."
+    return "Ask: 'How is TCS.NS?' or 'Forecast'"
