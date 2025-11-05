@@ -43,26 +43,34 @@ with tab_dashboard:
     st.header("Dashboard")
     investments = load_investments()
 
+    # ADD NEW STOCK
     with st.form("add_investment"):
         c1, c2 = st.columns(2)
         with c1:
-            ticker = st.text_input("Symbol:", "TCS.NS").upper()
-            buy_price = st.number_input("Buy Price:", 4000.00)
+            new_ticker = st.text_input("Symbol:", "TCS.NS").upper()
+            buy_price = st.number_input("Buy Price:", 4000.00, step=0.01)
         with c2:
-            qty = st.number_input("Qty:", 1)
+            qty = st.number_input("Qty:", 1, step=1)
             date = st.date_input("Date:", datetime(2025, 11, 4))
-            platform = st.selectbox("Platform:", ["Upstox", "Zerodha"])
+            platform = st.selectbox("Platform:", ["Upstox", "Zerodha", "Groww"])
         if st.form_submit_button("Add"):
             new = pd.DataFrame([{
-                'ticker': ticker, 'buy_price': buy_price, 'qty': qty,
+                'ticker': new_ticker, 'buy_price': buy_price, 'qty': qty,
                 'date': date.strftime('%Y-%m-%d'), 'platform': platform
             }])
             investments = pd.concat([investments, new], ignore_index=True)
             save_investments(investments)
+            st.success(f"{new_ticker} added!")
             st.rerun()
 
+    # SELECT STOCK TO VIEW
     if not investments.empty:
-        row = investments.iloc[0]
+        st.subheader("Select Stock to View")
+        selected_ticker = st.selectbox("Choose:", investments['ticker'].tolist())
+
+        # GET SELECTED ROW
+        row = investments[investments['ticker'] == selected_ticker].iloc[0]
+
         current, pnl_pct = get_pnl(row['ticker'], row['buy_price'], row['qty'])
         sentiment, advice = get_sentiment_advice(row['ticker'])
 
