@@ -5,8 +5,7 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
-import os
-from dotenv import load_dotenv
+import os  # Keep this
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import plotly.express as px
