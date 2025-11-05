@@ -4,9 +4,7 @@ pandas
 prophet
 transformers
 torch
-twilio
-pyyaml
-fpdf2
+smtplib
 plotly
 matplotlib
-python-dotenv
+streamlit-chat  # For chat bot bubbles
