@@ -1,214 +1,165 @@
-# utils.py - StockGuardian Core (FINAL: Charts, TBT, News, No tz_localize error)
 import yfinance as yf
 import pandas as pd
-import numpy as np
-from prophet import Prophet
-from sklearn.linear_model import LinearRegression
-from textblob import TextBlob
-import sqlite3
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-import time
+from datetime import datetime
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+import plotly.express as px
+from prophet import Prophet
+from twilio.rest import Client
+from transformers import pipeline
+import base64
+from fpdf import FPDF
+from io import BytesIO
 import streamlit as st
 
-# ========================
-# DATABASE SETUP
-# ========================
-def setup_db():
-    conn = sqlite3.connect('investments.db', check_same_thread=False)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS investments
-                 (symbol TEXT, buy_price REAL, quantity INTEGER, purchase_date TEXT, platform TEXT, email TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS alerts
-                 (symbol TEXT, alert_type TEXT, threshold REAL, email TEXT)''')
-    conn.commit()
-    return conn
-
-# ========================
-# FETCH STOCK DATA (FIXED: No tz_localize error)
-# ========================
-def fetch_stock_data(symbol):
-    symbol = symbol.strip().upper()
-    for attempt in range(3):
-        try:
-            ticker = yf.Ticker(symbol)
-            hist = ticker.history(period="1y", interval="1d", auto_adjust=True, prepost=True)
-            
-            # FIX: Only convert if timezone-aware
-            if hist.index.tz is not None:
-                hist.index = hist.index.tz_localize(None)
-            
-            if hist.empty or len(hist) < 10:
-                time.sleep(2)
-                continue
-
-            current_price = hist['Close'].iloc[-1]
-            if pd.isna(current_price):
-                current_price = ticker.info.get('regularMarketPrice', 0)
-
-            news = ticker.news[:5] if hasattr(ticker, 'news') else []
-
-            return {
-                'current_price': round(float(current_price), 2),
-                'history': hist,
-                'info': ticker.info,
-                'news': news
-            }
-        except Exception as e:
-            if attempt == 2:
-                st.warning(f"Failed to fetch {symbol}: {e}")
-            time.sleep(2)
-
-    # Fallback (offline/demo)
-    return {
-        'current_price': 3058.00,
-        'history': pd.DataFrame(),
-        'info': {'regularMarketPrice': 3058.00, 'bid': 3058.00, 'ask': 3061.70, 'bidSize': 10000, 'askSize': 8500},
-        'news': []
-    }
-
-# ========================
-# NEWS SENTIMENT
-# ========================
-def get_news_sentiment(news):
-    if not news:
-        return "Neutral"
-    titles = [item.get('title', '') for item in news if item.get('title')]
-    if not titles:
-        return "Neutral"
-    sentiments = [TextBlob(title).sentiment.polarity for title in titles]
-    avg = np.mean(sentiments)
-    return "Positive" if avg > 0.1 else "Negative" if avg < -0.1 else "Neutral"
-
-# ========================
-# PROFIT & LOSS
-# ========================
-def calculate_profit_loss(investments):
-    results = []
-    for inv in investments:
-        symbol = inv['symbol']
-        data = fetch_stock_data(symbol)
-        current_price = data['current_price']
-
-        if current_price <= 0:
-            results.append({
-                'symbol': symbol,
-                'current_price': 'N/A',
-                'profit_loss_abs': 'N to fetch',
-                'profit_loss_pct': 'N/A',
-                'breakeven': f"₹{inv['buy_price']:.2f}",
-                'stage': 'No Data',
-                'sentiment': 'N/A',
-                'advice': 'Check internet.'
-            })
-            continue
-
-        cost = inv['buy_price'] * inv['quantity']
-        value = current_price * inv['quantity']
-        profit_abs = value - cost
-        profit_pct = (profit_abs / cost) * 100 if cost > 0 else 0
-
-        stage = f"Profit: +{profit_pct:.1f}%" if profit_pct > 0 else f"Loss: {profit_pct:.1f}%"
-        sentiment = get_news_sentiment(data['news'])
-        advice = "Hold" if profit_pct >= 0 else "Monitor"
-
-        results.append({
-            'symbol': symbol,
-            'current_price': f"₹{current_price:,.2f}",
-            'profit_loss_abs': f"₹{profit_abs:,.2f}",
-            'profit_loss_pct': f"{profit_pct:+.2f}%",
-            'breakeven': f"₹{inv['buy_price']:,.2f}",
-            'stage': stage,
-            'sentiment': sentiment,
-            'advice': advice
-        })
-    return pd.DataFrame(results)
-
-# ========================
-# 30-DAY FORECAST
-# ========================
-def forecast_with_prophet(hist):
-    if hist.empty or len(hist) < 10:
-        return None
-    df = hist.reset_index()[['Date', 'Close']].copy()
-    df.columns = ['ds', 'y']
-    df['ds'] = pd.to_datetime(df['ds']).dt.tz_localize(None)
+# ========================================
+# 1. EMAIL ALERT
+# ========================================
+def send_alert_email(ticker: str, current_price: float, alert_type: str, user_email: str):
     try:
-        m = Prophet(daily_seasonality=True)
-        m.fit(df)
-        future = m.make_future_dataframe(periods=30)
-        forecast = m.predict(future)
-        return forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail(30)
-    except:
-        return None
+        sender_email = st.secrets["GMAIL_USER"]
+        sender_password = st.secrets["GMAIL_APP_PASSWORD"]
 
-# ========================
-# NEXT-DAY PREDICTION
-# ========================
-def short_term_prediction(hist):
-    if len(hist) < 5:
-        return "Need more data"
-    X = np.arange(len(hist)).reshape(-1, 1)
-    y = hist['Close'].values
-    model = LinearRegression()
-    model.fit(X, y)
-    next_price = model.predict([[len(hist)]])[0]
-    return f"Next day: ~₹{next_price:,.2f}"
+        if not user_email:
+            return False
 
-# ========================
-# SEND EMAIL
-# ========================
-def send_email(to_email, subject, body, sender_email, sender_password):
-    if not sender_email or not sender_password:
-        return
-    try:
         msg = MIMEMultipart()
-        msg['From'] = sender_email
-        msg['To'] = to_email
-        msg['Subject'] = subject
-        msg.attach(MIMEText(body, 'plain'))
-        server = smtplib.SMTP('smtp.gmail.com', 587)
+        msg["From"] = sender_email
+        msg["To"] = user_email
+        msg["Subject"] = f"StockGuardian: {ticker} {alert_type}"
+        body = f"{ticker} is at ${current_price:.2f} → {alert_type}\nCheck the app!"
+        msg.attach(MIMEText(body, "plain"))
+
+        server = smtplib.SMTP("smtp.gmail.com", 587)
         server.starttls()
         server.login(sender_email, sender_password)
-        server.sendmail(sender_email, to_email, msg.as_string())
+        server.sendmail(sender_email, user_email, msg.as_string())
         server.quit()
+        return True
     except Exception as e:
-        print(f"Email failed: {e}")
+        print(f"Email error: {e}")
+        return False
 
-# ========================
-# CHECK ALERTS
-# ========================
-def check_alerts(conn, sender_email, sender_password):
-    c = conn.cursor()
-    alerts = c.execute("SELECT symbol, alert_type, threshold, email FROM alerts").fetchall()
-    for alert in alerts:
-        symbol, alert_type, threshold, email = alert
-        data = fetch_stock_data(symbol)
-        current_price = data['current_price']
-        if current_price <= 0:
-            continue
 
-        inv = c.execute("SELECT buy_price, quantity FROM investments WHERE symbol=? AND email=?", (symbol, email)).fetchone()
-        if not inv:
-            continue
-        buy_price, qty = inv
-        profit_pct = ((current_price - buy_price) / buy_price) * 100
-        drop_pct = ((buy_price - current_price) / buy_price) * 100
+# ========================================
+# 2. WHATSAPP ALERT
+# ========================================
+def send_whatsapp_alert(ticker: str, current_price: float, alert_type: str, user_phone: str):
+    try:
+        client = Client(st.secrets.get("TWILIO_SID"), st.secrets.get("TWILIO_AUTH"))
+        if not user_phone or not st.secrets.get("TWILIO_WHATSAPP_FROM"):
+            return False
+        client.messages.create(
+            body=f"StockGuardian: {ticker} {alert_type} @ ${current_price:.2f}",
+            from_=st.secrets["TWILIO_WHATSAPP_FROM"],
+            to=f"whatsapp:{user_phone}",
+        )
+        return True
+    except Exception:
+        return False
 
-        triggered = False
-        body = ""
-        if alert_type == 'price' and current_price >= threshold:
-            triggered = True
-            body = f"{symbol} hit target ₹{threshold}! Now: ₹{current_price}"
-        elif alert_type == 'profit_pct' and profit_pct >= threshold:
-            triggered = True
-            body = f"{symbol} profit {profit_pct:.1f}% ≥ {threshold}%"
-        elif alert_type == 'drop_pct' and drop_pct >= threshold:
-            triggered = True
-            body = f"{symbol} dropped {drop_pct:.1f}% ≥ {threshold}%"
 
-        if triggered:
-            send_email(email, f"Stock Alert: {symbol}", body, sender_email, sender_password)
-            c.execute("DELETE FROM alerts WHERE symbol=? AND alert_type=? AND threshold=? AND email=?", (symbol, alert_type, threshold, email))
-            conn.commit()
+# ========================================
+# 3. LOAD / SAVE INVESTMENTS
+# ========================================
+def load_investments() -> pd.DataFrame:
+    try:
+        return pd.read_csv("investments.csv")
+    except FileNotFoundError:
+        return pd.DataFrame(
+            columns=[
+                "ticker",
+                "buy_price",
+                "qty",
+                "date",
+                "target_price",
+                "profit_pct",
+                "drop_pct",
+            ]
+        )
+
+def save_investments(df: pd.DataFrame):
+    df.to_csv("investments.csv", index=False)
+
+
+# ========================================
+# 4. FLOW CHART
+# ========================================
+def draw_flow_chart(df: pd.DataFrame):
+    if df.empty:
+        return None
+    fig, ax = plt.subplots(figsize=(8, 4))
+    invested = (df["buy_price"] * df["qty"]).sum()
+    current = 0.0
+    for _, r in df.iterrows():
+        try:
+            price = yf.Ticker(r["ticker"]).history(period="1d")["Close"].iloc[-1]
+            current += price * r["qty"]
+        except Exception:
+            pass
+    pnl = current - invested
+
+    ax.text(0.1, 0.5, f"Invested\n${invested:,.0f}", ha="center", fontsize=10,
+            bbox=dict(boxstyle="round", facecolor="lightblue"))
+    ax.text(0.5, 0.5, f"Current\n${current:,.0f}", ha="center", fontsize=10,
+            bbox=dict(boxstyle="round", facecolor="lightgreen"))
+    ax.text(0.9, 0.5, f"P&L\n${pnl:,.0f}", ha="center", fontsize=10,
+            bbox=dict(boxstyle="round", facecolor="lightcoral" if pnl < 0 else "lightgreen"))
+    ax.arrow(0.25, 0.5, 0.1, 0, head_width=0.05, fc="gray")
+    ax.arrow(0.65, 0.5, 0.1, 0, head_width=0.05, fc="gray")
+    ax.set_xlim(0, 1); ax.set_ylim(0, 1); ax.axis("off")
+    plt.title("Portfolio Flow")
+    return fig
+
+
+# ========================================
+# 5. AI PREDICTION WITH SENTIMENT
+# ========================================
+sentiment_pipeline = pipeline("sentiment-analysis", model="ProsusAI/finbert", device=-1)
+
+def predict_with_sentiment(ticker: str):
+    try:
+        data = yf.download(ticker, period="1y")
+        data = data.reset_index()
+        data["ds"] = data["Date"]
+        data["y"] = data["Close"]
+
+        news = yf.Ticker(ticker).news[:3]
+        scores = []
+        for item in news:
+            res = sentiment_pipeline(item["title"])[0]
+            scores.append(res["score"] if res["label"] == "positive" else -res["score"])
+        sentiment = sum(scores) / len(scores) if scores else 0
+        data["sentiment"] = sentiment
+
+        m = Prophet()
+        m.add_regressor("sentiment")
+        m.fit(data[["ds", "y", "sentiment"]])
+        future = m.make_future_dataframe(periods=30)
+        future["sentiment"] = sentiment
+        forecast = m.predict(future)
+        return forecast[["ds", "yhat"]], sentiment
+    except Exception as e:
+        print(f"Prediction error: {e}")
+        return None, 0
+
+
+# ========================================
+# 6. PDF EXPORT
+# ========================================
+def export_pdf(df: pd.DataFrame):
+    if df.empty:
+        return None
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", size=12)
+    pdf.cell(200, 10, txt="StockGuardian Portfolio", ln=1, align="C")
+    for _, r in df.iterrows():
+        pdf.cell(200, 10, txt=f"{r['ticker']}: {r['qty']} @ ${r['buy_price']} (Target ${r['target_price']})", ln=1)
+    buffer = BytesIO()
+    pdf.output(buffer)
+    buffer.seek(0)
+    return buffer.getvalue()
