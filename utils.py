@@ -6,9 +6,9 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 from prophet import Prophet
-from transformers import pipeline
 import plotly.express as px
 import matplotlib.pyplot as plt
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 # ========================================
 # 1. INVESTMENTS
@@ -24,7 +24,7 @@ def save_investments(df):
     df.to_csv('investments.csv', index=False)
 
 # ========================================
-# 2. EMAIL SETUP & SEND
+# 2. EMAIL
 # ========================================
 def send_alert_email(ticker, price, alert_type):
     try:
@@ -52,7 +52,7 @@ def send_alert_email(ticker, price, alert_type):
         return False
 
 # ========================================
-# 3. P&L & PRICE
+# 3. P&L
 # ========================================
 def get_pnl(ticker, buy_price, qty):
     try:
@@ -64,20 +64,19 @@ def get_pnl(ticker, buy_price, qty):
         return buy_price, 0.0
 
 # ========================================
-# 4. SENTIMENT & ADVICE
+# 4. SENTIMENT (VADER - NO TORCH)
 # ========================================
 @st.cache_resource
-def get_sentiment_pipeline():
-    return pipeline("sentiment-analysis", model="ProsusAI/finbert")
+def get_sentiment_analyzer():
+    return SentimentIntensityAnalyzer()
 
 def get_sentiment_advice(ticker):
+    analyzer = get_sentiment_analyzer()
     try:
-        pipeline = get_sentiment_pipeline()
         news = yf.Ticker(ticker).news[:3]
         scores = []
         for item in news:
-            result = pipeline(item['title'])[0]
-            score = result['score'] if result['label'] == 'positive' else -result['score']
+            score = analyzer.polarity_scores(item['title'])['compound']
             scores.append(score)
         avg = sum(scores) / len(scores) if scores else 0
         if avg > 0.3:
@@ -90,7 +89,7 @@ def get_sentiment_advice(ticker):
         return "Neutral", "Hold"
 
 # ========================================
-# 5. FORECAST CHART
+# 5. FORECAST
 # ========================================
 def draw_forecast_chart(ticker):
     try:
@@ -100,35 +99,31 @@ def draw_forecast_chart(ticker):
         data = data.reset_index()
         data['ds'] = data['Date']
         data['y'] = data['Close']
-        m = Prophet(yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=False)
+        m = Prophet()
         m.fit(data[['ds', 'y']])
         future = m.make_future_dataframe(periods=30)
         forecast = m.predict(future)
         fig = px.line(forecast.tail(60), x='ds', y='yhat', title=f"{ticker} 30-Day Forecast")
         fig.add_scatter(x=data['ds'], y=data['y'], mode='lines', name='Actual')
         return fig
-    except Exception as e:
+    except:
         fig, ax = plt.subplots()
-        ax.text(0.5, 0.5, 'No historical data.', ha='center', va='center', fontsize=12)
+        ax.text(0.5, 0.5, 'No historical data.', ha='center', va='center')
         ax.set_title(f"Chart & Forecast: {ticker}")
         ax.axis('off')
         return fig
 
 # ========================================
-# 6. CHAT BOT RESPONSE
+# 6. CHAT BOT
 # ========================================
 def chat_bot_response(query, investments):
     query = query.lower()
     if "bye" in query:
         return "Bye! Stay profitable"
     if "tcs" in query or "tcs.ns" in query:
-        if not investments.empty and investments.iloc[0]['ticker'] == "TCS.NS":
-            current, pct = get_pnl("TCS.NS", investments.iloc[0]['buy_price'], 1)
-            sentiment, advice = get_sentiment_advice("TCS.NS")
-            return f"TCS.NS: ₹{current:.2f} | Profit: {pct:+.1f}% | Sentiment: {sentiment} | Advice: {advice}"
-        else:
-            return "Add TCS.NS to track it!"
+        current, pct = get_pnl("TCS.NS", 4000, 1)
+        sentiment, advice = get_sentiment_advice("TCS.NS")
+        return f"TCS.NS: ₹{current:.2f} | Profit: {pct:+.1f}% | Sentiment: {sentiment} | Advice: {advice}"
     if "forecast" in query:
-        ticker = investments.iloc[0]['ticker'] if not investments.empty else "TCS.NS"
-        return f"Generating 30-day forecast for {ticker}..."
-    return "Ask: 'How is TCS.NS?' or 'Forecast'"
+        return "Check the Dashboard tab for 30-day forecast!"
+    return "Try: 'How is TCS.NS?' or 'Bye'"
