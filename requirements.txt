@@ -5,3 +5,4 @@ prophet
 plotly
 matplotlib
 vaderSentiment
+twilio
