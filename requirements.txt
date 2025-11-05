@@ -2,9 +2,6 @@ streamlit
 yfinance
 pandas
 prophet
-transformers
-torch
-smtplib
 plotly
 matplotlib
-streamlit-chat  # For chat bot bubbles
+vaderSentiment
