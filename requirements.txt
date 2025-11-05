@@ -4,14 +4,6 @@ pandas
 prophet
 plotly
 matplotlib
-vaderSentiment
-twilio
-streamlit
-yfinance
-pandas
-prophet
-plotly
-matplotlib
 mplfinance
 vaderSentiment
 twilio
