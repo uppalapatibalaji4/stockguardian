@@ -5,17 +5,14 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, time as dt_time
-from prophet import Prophet
-import plotly.express as px
-import matplotlib.pyplot as plt
-import mplfinance as mpf
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from twilio.rest import Client
+import time
 
 # ========================================
 # 1. INVESTMENTS
 # ========================================
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=3600)  # Cache 1 hour
 def load_investments():
     try:
         return pd.read_csv('investments.csv')
@@ -26,100 +23,45 @@ def save_investments(df):
     df.to_csv('investments.csv', index=False)
 
 # ========================================
-# 2. EMAIL ALERT (REAL LIVE PRICE)
+# 2. LIVE DATA (SAFE + RATE LIMIT PROOF)
 # ========================================
-def send_email_alert(ticker, current_price, alert_type):
-    try:
-        sender = st.session_state.get("sender_email", "")
-        password = st.session_state.get("app_password", "")
-        user_email = st.session_state.get("user_email", "")
-        if not all([sender, password, user_email]):
-            st.warning("Setup Gmail first!")
-            return False
-
-        msg = MIMEMultipart()
-        msg['From'] = sender
-        msg['To'] = user_email
-        msg['Subject'] = f"StockGuardian Alert: {ticker}"
-        body = f"{ticker} {alert_type} at ₹{current_price:.2f}\nTime: {datetime.now().strftime('%Y-%m-%d %H:%M')}\nCheck app!"
-        msg.attach(MIMEText(body, 'plain'))
-
-        server = smtplib.SMTP('smtp.gmail.com', 587)
-        server.starttls()
-        server.login(sender, password)
-        server.sendmail(sender, user_email, msg.as_string())
-        server.quit()
-        st.success(f"Email sent for {ticker}!")
-        return True
-    except Exception as e:
-        st.error(f"Email failed: {e}")
-        return False
-
-# ========================================
-# 3. WHATSAPP ALERT
-# ========================================
-def send_whatsapp_alert(ticker, current_price, alert_type):
-    try:
-        sid = st.secrets.get("TWILIO_SID", "")
-        token = st.secrets.get("TWILIO_TOKEN", "")
-        from_num = st.secrets.get("TWILIO_FROM", "")
-        to_num = st.session_state.get("whatsapp_number", "")
-        if not all([sid, token, from_num, to_num]):
-            st.warning("Setup WhatsApp first!")
-            return False
-
-        client = Client(sid, token)
-        client.messages.create(
-            body=f"🚨 StockGuardian: {ticker} {alert_type} at ₹{current_price:.2f}",
-            from_=f"whatsapp:{from_num}",
-            to=f"whatsapp:{to_num}"
-        )
-        st.success(f"WhatsApp sent for {ticker}!")
-        return True
-    except Exception as e:
-        st.error(f"WhatsApp failed: {e}")
-        return False
-
-# ========================================
-# 4. LIVE DATA (UPSTOX STYLE)
-# ========================================
+@st.cache_data(ttl=60)  # Update every 60 sec
 def get_live_data(ticker):
     try:
+        # Delay to avoid rate limit
+        time.sleep(1)
         stock = yf.Ticker(ticker)
         info = stock.info
         hist = stock.history(period="1d")
+
         if hist.empty:
-            return None, "No data available"
+            return None, "No data (market closed or invalid ticker)"
 
-        current_price = info.get('regularMarketPrice', hist['Close'].iloc[-1])
-        open_price = info.get('regularMarketOpen', hist['Open'].iloc[0])
-        high_price = info.get('regularMarketDayHigh', hist['High'].max())
-        low_price = info.get('regularMarketDayLow', hist['Low'].min())
-        volume = info.get('regularMarketVolume', hist['Volume'].sum())
-        prev_close = info.get('regularMarketPreviousClose', hist['Close'].iloc[-1])
+        current = info.get('regularMarketPrice') or hist['Close'].iloc[-1]
+        open_p = info.get('regularMarketOpen') or hist['Open'].iloc[0]
+        high = info.get('regularMarketDayHigh') or hist['High'].max()
+        low = info.get('regularMarketDayLow') or hist['Low'].min()
+        volume = info.get('regularMarketVolume') or int(hist['Volume'].sum())
+        prev_close = info.get('regularMarketPreviousClose') or hist['Close'].iloc[-1]
 
-        # Market status (IST)
         now = datetime.now().time()
-        market_open = dt_time(9, 15)
-        market_close = dt_time(15, 30)
-        is_open = market_open <= now <= market_close
+        is_open = dt_time(9, 15) <= now <= dt_time(15, 30)
 
         return {
-            'current': current_price,
-            'open': open_price,
-            'high': high_price,
-            'low': low_price,
+            'current': round(current, 2),
+            'open': round(open_p, 2),
+            'high': round(high, 2),
+            'low': round(low, 2),
             'volume': volume,
-            'prev_close': prev_close,
-            'change_pct': ((current_price - prev_close) / prev_close) * 100 if prev_close else 0,
-            'market_open': is_open,
-            'hist': hist
+            'prev_close': round(prev_close, 2),
+            'change_pct': round(((current - prev_close) / prev_close) * 100, 2) if prev_close else 0,
+            'market_open': is_open
         }, None
     except Exception as e:
-        return None, f"Error: {e}"
+        return None, f"Error: {str(e)[:50]}"
 
 # ========================================
-# 5. P&L CALC
+# 3. P&L
 # ========================================
 def get_pnl(ticker, buy_price):
     data, error = get_live_data(ticker)
@@ -127,78 +69,71 @@ def get_pnl(ticker, buy_price):
         return None, error
     current = data['current']
     pnl_pct = ((current - buy_price) / buy_price) * 100
-    return current, pnl_pct
+    return current, round(pnl_pct, 2)
 
 # ========================================
-# 6. SENTIMENT & ADVICE
+# 4. SENTIMENT
 # ========================================
 @st.cache_resource
 def get_sentiment_analyzer():
     return SentimentIntensityAnalyzer()
 
 def get_sentiment_advice(ticker):
-    analyzer = get_sentiment_analyzer()
     try:
-        stock = yf.Ticker(ticker)
-        news = stock.news[:3]
+        news = yf.Ticker(ticker).news[:3]
+        analyzer = get_sentiment_analyzer()
         scores = [analyzer.polarity_scores(n['title'])['compound'] for n in news]
         avg = sum(scores) / len(scores) if scores else 0
-        if avg > 0.3:
-            return "Positive", "Buy"
-        elif avg < -0.3:
-            return "Negative", "Sell"
-        else:
-            return "Neutral", "Hold"
+        if avg > 0.3: return "Positive", "Buy"
+        elif avg < -0.3: return "Negative", "Sell"
+        else: return "Neutral", "Hold"
     except:
         return "Neutral", "Hold"
 
 # ========================================
-# 7. FULL TRADING CHART (CANDLESTICK + VOLUME)
+# 5. EMAIL ALERT
 # ========================================
-def draw_trading_chart(ticker):
+def send_email_alert(ticker, price, typ):
     try:
-        hist = yf.download(ticker, period='5d', interval='5m', progress=False)
-        if hist.empty or len(hist) < 10:
-            fig, ax = plt.subplots(figsize=(10, 6))
-            ax.text(0.5, 0.5, 'No historical data. Try adding more time.', ha='center', va='center', fontsize=14)
-            ax.set_title(f"Chart & Forecast: {ticker}")
-            ax.axis('off')
-            return fig
-
-        # Candlestick chart with volume
-        mpf.plot(hist, type='candle', style='charles', volume=True, figsize=(12, 8),
-                 title=f"{ticker} Live Trading Chart", returnfig=True)
-        return plt.gcf()
-    except Exception as e:
-        fig, ax = plt.subplots(figsize=(10, 6))
-        ax.text(0.5, 0.5, f'Chart error: {e}', ha='center', va='center', fontsize=12)
-        ax.set_title(f"Chart & Forecast: {ticker}")
-        ax.axis('off')
-        return fig
+        s = st.session_state.get("sender_email")
+        p = st.session_state.get("app_password")
+        u = st.session_state.get("user_email")
+        if not all([s, p, u]): return False
+        msg = MIMEMultipart()
+        msg['From'] = s; msg['To'] = u; msg['Subject'] = f"Alert: {ticker}"
+        msg.attach(MIMEText(f"{ticker} {typ} at ₹{price}\n{datetime.now().strftime('%Y-%m-%d %H:%M')}", 'plain'))
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls(); server.login(s, p)
+        server.sendmail(s, u, msg.as_string()); server.quit()
+        return True
+    except: return False
 
 # ========================================
-# 8. CHAT BOT RESPONSE
+# 6. WHATSAPP ALERT
 # ========================================
-def chat_bot_response(query, investments):
-    if investments.empty:
-        return "Add a stock first!"
-    ticker = investments.iloc[0]['ticker']
-    data, error = get_live_data(ticker)
-    if error:
-        return error
-    current = data['current']
-    sentiment, advice = get_sentiment_advice(ticker)
-    return f"{ticker} is at ₹{current:.2f} (Change: {data['change_pct']:+.2f}%). Sentiment: {sentiment}. Advice: {advice}."
+def send_whatsapp_alert(ticker, price, typ):
+    try:
+        sid = st.secrets.get("TWILIO_SID")
+        token = st.secrets.get("TWILIO_TOKEN")
+        fr = st.secrets.get("TWILIO_FROM")
+        to = st.session_state.get("whatsapp_number")
+        if not all([sid, token, fr, to]): return False
+        Client(sid, token).messages.create(
+            body=f"{ticker} {typ} at ₹{price}",
+            from_=f"whatsapp:{fr}", to=f"whatsapp:{to}"
+        )
+        return True
+    except: return False
 
 # ========================================
-# 9. TEST ALERT (REAL LIVE PRICE)
+# 7. TEST ALERT
 # ========================================
 def test_alert(ticker):
-    data, error = get_live_data(ticker)
-    if error:
-        st.error(error)
+    data, err = get_live_data(ticker)
+    if err:
+        st.error(err)
         return
-    price = data['current']
-    email_sent = send_email_alert(ticker, price, "TEST - Live Price")
-    wa_sent = send_whatsapp_alert(ticker, price, "TEST - Live Price")
-    st.success(f"Email: {'Sent' if email_sent else 'Failed'} | WhatsApp: {'Sent' if wa_sent else 'Failed'}")
+    p = data['current']
+    e = send_email_alert(ticker, p, "TEST")
+    w = send_whatsapp_alert(ticker, p, "TEST")
+    st.success(f"Email: {'Sent' if e else 'Failed'} | WhatsApp: {'Sent' if w else 'Failed'}")
