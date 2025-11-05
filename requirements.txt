@@ -1,9 +1,5 @@
 streamlit
 yfinance
 pandas
-prophet
-plotly
-matplotlib
-mplfinance
 vaderSentiment
 twilio
