@@ -3,22 +3,24 @@ import streamlit as st
 import os
 import yfinance as yf
 import pandas as pd
-from prophet import Prophet
+import numpy as np
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
 from twilio.rest import Client
 from transformers import pipeline, Conversation
 
+
 # --------------------------------------------------------------
-# 1. Email Alert — MimeText imported INSIDE function
+# 1. Email Alert (MimeText inside function)
 # --------------------------------------------------------------
 def send_email(subject: str, body: str, to_email: str) -> bool:
     EMAIL_USER = os.getenv('EMAIL_USER')
     EMAIL_PASS = os.getenv('EMAIL_PASS')
     if not (EMAIL_USER and EMAIL_PASS):
-        st.error("Email not configured (check .env)")
+        st.error("Email not configured")
         return False
 
-    # Import here to avoid top-level import issues
     from email.mime.text import MimeText
+    import smtplib
 
     msg = MimeText(body)
     msg['Subject'] = subject
@@ -26,7 +28,6 @@ def send_email(subject: str, body: str, to_email: str) -> bool:
     msg['To'] = to_email
 
     try:
-        import smtplib
         server = smtplib.SMTP('smtp.gmail.com', 587)
         server.starttls()
         server.login(EMAIL_USER, EMAIL_PASS)
@@ -73,7 +74,7 @@ def get_stock_price(symbol: str) -> float | None:
             return round(data['Close'].iloc[-1], 4)
         return None
     except Exception as e:
-        st.warning(f"Price error for {symbol}: {e}")
+        st.warning(f"Price error: {e}")
         return None
 
 
@@ -94,21 +95,39 @@ def calculate_pnl(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # --------------------------------------------------------------
-# 5. Forecast
+# 5. 30-Day Forecast (using Exponential Smoothing)
 # --------------------------------------------------------------
 @st.cache_data
 def forecast_stock(symbol: str, days: int = 30):
     try:
-        data = yf.download(symbol, period='2y', progress=False)
-        if data.empty:
-            st.error(f"No data for {symbol}")
+        data = yf.download(symbol, period='1y', progress=False)
+        if data.empty or len(data) < 50:
+            st.error(f"Not enough data for {symbol}")
             return None
-        df = data.reset_index()[['Date', 'Close']].rename(columns={'Date': 'ds', 'Close': 'y'})
-        m = Prophet(daily_seasonality=True)
-        m.fit(df)
-        future = m.make_future_dataframe(periods=days)
-        forecast = m.predict(future)
-        return forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail(days + 1)
+
+        close = data['Close'].dropna()
+        if len(close) < 50:
+            return None
+
+        # Use Exponential Smoothing
+        model = ExponentialSmoothing(close, trend='add', seasonal=None)
+        fit = model.fit()
+        forecast = fit.forecast(days)
+
+        # Create future dates
+        last_date = close.index[-1]
+        future_dates = pd.date_range(start=last_date + pd.Timedelta(days=1), periods=days, freq='B')
+
+        result = pd.DataFrame({
+            'ds': future_dates,
+            'yhat': forecast.values
+        })
+        # Simple confidence: ±10%
+        result['yhat_lower'] = result['yhat'] * 0.9
+        result['yhat_upper'] = result['yhat'] * 1.1
+
+        return result[['ds', 'yhat', 'yhat_lower', 'yhat_upper']]
+
     except Exception as e:
         st.error(f"Forecast failed: {e}")
         return None
