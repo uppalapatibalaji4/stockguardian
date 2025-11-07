@@ -62,7 +62,7 @@ def send_whatsapp(message: str) -> bool:
 
 
 # --------------------------------------------------------------
-# 3. GET STOCK PRICE (cached)
+# 3. GET STOCK PRICE
 # --------------------------------------------------------------
 @st.cache_data(ttl=60)
 def get_stock_price(symbol: str) -> float | None:
@@ -73,17 +73,15 @@ def get_stock_price(symbol: str) -> float | None:
             return round(data['Close'].iloc[-1], 4)
         return None
     except:
-        st.warning(f"Failed to fetch price for {symbol}")
         return None
 
 
 # --------------------------------------------------------------
-# 4. CALCULATE P&L
+# 4. P&L CALCULATION
 # --------------------------------------------------------------
 def calculate_pnl(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
-
     out = df.copy()
     out['current_price'] = out['symbol'].apply(get_stock_price)
     out['value'] = out['current_price'] * out['quantity']
