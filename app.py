@@ -2,8 +2,8 @@
 import streamlit as st
 import pandas as pd
 from datetime import date
-import plotly.express as px
 
+# Import utils after Streamlit is ready
 from utils import (
     send_email, send_whatsapp, get_stock_price,
     calculate_pnl, forecast_stock, get_ai_response
@@ -24,7 +24,6 @@ if 'alerts' not in st.session_state:
     )
 if 'chat_history' not in st.session_state:
     st.session_state.chat_history = []
-
 
 # --------------------------------------------------------------
 # CHECK ALERTS
@@ -51,7 +50,6 @@ def check_alerts(df_pnl: pd.DataFrame):
         if msg:
             send_email(f"Alert: {sym}", msg, st.session_state.user_email)
             send_whatsapp(msg)
-
 
 # --------------------------------------------------------------
 # UI
@@ -91,18 +89,23 @@ with tab1:
         c1.metric("Total P&L", f"${total_pnl:,.2f}")
         c2.metric("Return", f"{total_pct:.2f}%")
 
-        fig = px.pie(df, values='value', names='symbol', title="Portfolio Allocation")
-        st.plotly_chart(fig, use_container_width=True)
+        # Safe Plotly import
+        try:
+            import plotly.express as px
+            fig = px.pie(df, values='value', names='symbol', title="Portfolio Allocation")
+            st.plotly_chart(fig, use_container_width=True)
 
-        sel = st.selectbox("30-Day Forecast", df['symbol'])
-        fc = forecast_stock(sel)
-        if fc is not None:
-            fig_fc = px.line(fc, x='ds', y='yhat', title=f"30-Day Forecast: {sel}")
-            fig_fc.add_scatter(x=fc['ds'], y='yhat_upper', mode='lines', name='Upper Bound')
-            fig_fc.add_scatter(x=fc['ds'], y='yhat_lower', mode='lines', name='Lower Bound')
-            st.plotly_chart(fig_fc, use_container_width=True)
-        else:
-            st.warning("Not enough data for forecast.")
+            sel = st.selectbox("30-Day Forecast", df['symbol'])
+            fc = forecast_stock(sel)
+            if fc is not None:
+                fig_fc = px.line(fc, x='ds', y='yhat', title=f"30-Day Forecast: {sel}")
+                fig_fc.add_scatter(x=fc['ds'], y='yhat_upper', mode='lines', name='Upper Bound')
+                fig_fc.add_scatter(x=fc['ds'], y='yhat_lower', mode='lines', name='Lower Bound')
+                st.plotly_chart(fig_fc, use_container_width=True)
+            else:
+                st.warning("Not enough data for forecast.")
+        except Exception as e:
+            st.warning(f"Charts not available: {e}")
 
 # === ADD STOCK ===
 with tab2:
@@ -169,7 +172,6 @@ with tab4:
                 st.markdown(ans)
                 st.session_state.chat_history.append({"role": "assistant", "content": ans})
         st.rerun()
-
 
 # --------------------------------------------------------------
 # AUTO ALERT CHECK
