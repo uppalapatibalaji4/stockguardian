@@ -81,7 +81,7 @@ with tab1:
         sel = st.selectbox("Forecast", df['symbol'])
         fc = forecast_stock(sel)
         if fc is not None:
-            fig_fc = px.line(fc, x='ds', y='yhat', title=f"30-Day Forecast: {sel}")
+            fig_fc = px.line(fc, x='ds', y='yhat', title=f"30-Day: {sel}")
             fig_fc.add_scatter(x=fc['ds'], y='yhat_upper', mode='lines', name='Upper')
             fig_fc.add_scatter(x=fc['ds'], y='yhat_lower', mode='lines', name='Lower')
             st.plotly_chart(fig_fc, use_container_width=True)
