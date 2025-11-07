@@ -1,6 +1,11 @@
-streamlit
-yfinance
-pandas
-plotly
-vaderSentiment
-twilio
+streamlit==1.38.0
+yfinance==0.2.43
+prophet==1.1.5
+transformers==4.44.2
+torch==2.4.1
+pandas==2.2.2
+numpy==2.1.1
+plotly==5.24.0
+smtplib  # Built-in, but for email
+twilio==9.3.0  # For WhatsApp
+python-dotenv==1.0.1  # For env vars
