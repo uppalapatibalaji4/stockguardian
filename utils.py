@@ -4,18 +4,18 @@ import os
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import timedelta
 from twilio.rest import Client
 
 
 # --------------------------------------------------------------
-# 1. Email Alert
+# 1. EMAIL ALERT
 # --------------------------------------------------------------
 def send_email(subject: str, body: str, to_email: str) -> bool:
     EMAIL_USER = os.getenv('EMAIL_USER')
     EMAIL_PASS = os.getenv('EMAIL_PASS')
     if not (EMAIL_USER and EMAIL_PASS):
-        st.error("Email not configured in .env")
+        st.error("Email not configured in Secrets")
         return False
 
     from email.mime.text import MimeText
@@ -40,7 +40,7 @@ def send_email(subject: str, body: str, to_email: str) -> bool:
 
 
 # --------------------------------------------------------------
-# 2. WhatsApp Alert
+# 2. WHATSAPP ALERT
 # --------------------------------------------------------------
 def send_whatsapp(message: str) -> bool:
     sid = os.getenv('TWILIO_ACCOUNT_SID')
@@ -62,7 +62,7 @@ def send_whatsapp(message: str) -> bool:
 
 
 # --------------------------------------------------------------
-# 3. Stock Price (cached)
+# 3. GET STOCK PRICE (cached)
 # --------------------------------------------------------------
 @st.cache_data(ttl=60)
 def get_stock_price(symbol: str) -> float | None:
@@ -73,12 +73,12 @@ def get_stock_price(symbol: str) -> float | None:
             return round(data['Close'].iloc[-1], 4)
         return None
     except:
-        st.warning(f"Failed to fetch {symbol}")
+        st.warning(f"Failed to fetch price for {symbol}")
         return None
 
 
 # --------------------------------------------------------------
-# 4. P&L Calculation
+# 4. CALCULATE P&L
 # --------------------------------------------------------------
 def calculate_pnl(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
@@ -94,7 +94,7 @@ def calculate_pnl(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # --------------------------------------------------------------
-# 5. 30-Day Forecast — PURE MATH (NO ML)
+# 5. 30-DAY FORECAST (PURE MATH)
 # --------------------------------------------------------------
 @st.cache_data
 def forecast_stock(symbol: str, days: int = 30):
@@ -102,69 +102,49 @@ def forecast_stock(symbol: str, days: int = 30):
         data = yf.download(symbol, period='3mo', progress=False)
         if data.empty or len(data) < 20:
             return None
-
         close = data['Close'].dropna()
         if len(close) < 20:
             return None
 
-        # Linear trend
         x = np.arange(len(close))
         slope, intercept = np.polyfit(x, close, 1)
-        last_price = close.iloc[-1]
-
-        # Generate future
         future_x = np.arange(len(close), len(close) + days)
-        base_forecast = slope * future_x + intercept
-
-        # Add ±5% noise
+        base = slope * future_x + intercept
         noise = np.random.normal(1, 0.05, days)
-        forecast = base_forecast * noise
+        forecast = base * noise
 
-        # Dates
         last_date = close.index[-1]
-        future_dates = pd.bdate_range(start=last_date + pd.Timedelta(days=1), periods=days)
+        dates = pd.bdate_range(start=last_date + pd.Timedelta(days=1), periods=days)
 
-        result = pd.DataFrame({
-            'ds': future_dates,
-            'yhat': forecast
-        })
+        result = pd.DataFrame({'ds': dates, 'yhat': forecast})
         result['yhat_lower'] = result['yhat'] * 0.90
         result['yhat_upper'] = result['yhat'] * 1.10
 
         return result[['ds', 'yhat', 'yhat_lower', 'yhat_upper']]
-
     except:
         return None
 
 
 # --------------------------------------------------------------
-# 6. AI Chat — RULE-BASED (NO TRANSFORMERS)
+# 6. AI CHAT (RULE-BASED)
 # --------------------------------------------------------------
 def get_ai_response(user_input: str, context: str = "") -> str:
     user_input = user_input.lower().strip()
 
-    # Simple keyword responses
-    if any(word in user_input for word in ["hello", "hi", "hey"]):
-        return "Hello! I'm your stock assistant. Ask me about your portfolio, prices, or forecasts."
+    if any(word in user_input for word in ["hi", "hello", "hey"]):
+        return "Hello! I'm your stock assistant. Ask about prices, P&L, or forecasts."
 
-    elif "price" in user_input or "worth" in user_input:
-        symbols = [s for s in context.split() if s.replace(',', '').isupper()]
-        if symbols:
-            prices = []
-            for sym in symbols[:3]:
-                p = get_stock_price(sym)
-                if p:
-                    prices.append(f"{sym}: ${p:.2f}")
-            return "Current prices:\n" + "\n".join(prices) if prices else "No price data."
+    elif "price" in user_input:
+        return "Check the **Dashboard** for live prices."
 
-    elif "forecast" in user_input or "predict" in user_input:
-        return "I can show a 30-day trend in the Dashboard. Try adding a stock and checking the forecast tab!"
+    elif "forecast" in user_input:
+        return "See the **30-day forecast** in the Dashboard tab."
 
     elif "profit" in user_input or "loss" in user_input:
-        return "Check the Dashboard for your total P&L and percentage return."
+        return "Your total P&L and return % are shown in the **Dashboard**."
 
     elif "alert" in user_input:
-        return "Set price, profit %, or drop % alerts in the Alerts tab. You'll get email + WhatsApp!"
+        return "Set alerts in the **Alerts** tab. You'll get Email + WhatsApp!"
 
     else:
-        return "I can help with:\n• Current prices\n• Portfolio P&L\n• 30-day forecasts\n• Setting alerts\nAsk me anything!"
+        return "I can help with:\n• Current prices\n• P&L\n• 30-day forecasts\n• Alerts\nAsk me anything!"
