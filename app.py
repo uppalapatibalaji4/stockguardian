@@ -4,17 +4,11 @@ import pandas as pd
 from datetime import date
 import plotly.express as px
 
+# Import utils AFTER Streamlit is ready
 from utils import (
-    send_email, send_whatsapp, get_stock_price_raw,
+    send_email, send_whatsapp, get_stock_price,
     calculate_pnl, forecast_stock, get_ai_response
 )
-
-# --------------------------------------------------------------
-# Cached price getter (Streamlit-safe)
-# --------------------------------------------------------------
-@st.cache_data(ttl=60)
-def get_stock_price(symbol: str) -> float | None:
-    return get_stock_price_raw(symbol)
 
 # --------------------------------------------------------------
 # Session State
@@ -57,10 +51,8 @@ def check_alerts(df_pnl: pd.DataFrame):
                 msg = f"{sym} dropped to {pnl:.1f}%"
 
         if msg:
-            if send_email(f"Alert: {sym}", msg, st.session_state.user_email):
-                st.toast("Email sent!")
-            if send_whatsapp(msg):
-                st.toast("WhatsApp sent!")
+            send_email(f"Alert: {sym}", msg, st.session_state.user_email)
+            send_whatsapp(msg)
 
 # --------------------------------------------------------------
 # UI
@@ -70,35 +62,35 @@ st.title("StockGuardian – AI Stock Agent")
 
 with st.sidebar:
     st.header("Setup")
-    email = st.text_input("Email", value=st.session_state.user_email)
-    if st.button("Save"):
+    email = st.text_input("Your Email", value=st.session_state.user_email)
+    if st.button("Save Email"):
         st.session_state.user_email = email
         st.success("Saved!")
 
-    if st.button("Check Alerts"):
+    if st.button("Check Alerts Now"):
         if not st.session_state.investments.empty:
-            df = calculate_pnl(st.session_state.investments, get_stock_price)
+            df = calculate_pnl(st.session_state.investments)
             check_alerts(df)
 
-tab1, tab2, tab3, tab4 = st.tabs(["Dashboard", "Add", "Alerts", "Chat"])
+tab1, tab2, tab3, tab4 = st.tabs(["Dashboard", "Add Stock", "Alerts", "AI Chat"])
 
-# --- Dashboard ---
+# === Dashboard ===
 with tab1:
     st.header("Portfolio")
     if st.session_state.investments.empty:
-        st.info("Add a stock to begin.")
+        st.info("Add your first stock!")
     else:
-        df = calculate_pnl(st.session_state.investments, get_stock_price)
+        df = calculate_pnl(st.session_state.investments)
         st.dataframe(df[['symbol', 'current_price', 'pnl', 'pnl_pct']], use_container_width=True)
 
         total_pnl = df['pnl'].sum()
         total_inv = df['invested'].sum()
         total_pct = (total_pnl / total_inv) * 100 if total_inv else 0
         c1, c2 = st.columns(2)
-        c1.metric("P&L", f"${total_pnl:,.2f}")
+        c1.metric("Total P&L", f"${total_pnl:,.2f}")
         c2.metric("Return", f"{total_pct:.2f}%")
 
-        fig = px.pie(df, values='value', names='symbol')
+        fig = px.pie(df, values='value', names='symbol', title="Allocation")
         st.plotly_chart(fig, use_container_width=True)
 
         sel = st.selectbox("Forecast", df['symbol'])
@@ -109,30 +101,31 @@ with tab1:
             fig_fc.add_scatter(x=fc['ds'], y='yhat_lower', mode='lines', name='Lower')
             st.plotly_chart(fig_fc, use_container_width=True)
 
-# --- Add Stock ---
+# === Add Stock ===
 with tab2:
-    st.header("Add Stock")
-    with st.form("add"):
-        sym = st.text_input("Symbol").upper()
+    st.header("Add Investment")
+    with st.form("add_form"):
+        sym = st.text_input("Symbol").strip().upper()
         price = st.number_input("Buy Price", min_value=0.01)
         qty = st.number_input("Quantity", min_value=0.01)
-        bdate = st.date_input("Date", date.today())
+        bdate = st.date_input("Buy Date", date.today())
         if st.form_submit_button("Add"):
             new = pd.DataFrame([{'symbol': sym, 'buy_price': price, 'quantity': qty, 'buy_date': bdate}])
             st.session_state.investments = pd.concat([st.session_state.investments, new], ignore_index=True)
             st.success("Added!")
             st.rerun()
 
-# --- Alerts ---
+# === Alerts ===
 with tab3:
-    st.header("Alerts")
+    st.header("Set Alerts")
     if st.session_state.investments.empty:
         st.warning("Add stocks first.")
     else:
         sym = st.selectbox("Stock", st.session_state.investments['symbol'])
         atype = st.selectbox("Type", ['price', 'profit', 'drop'])
         val = st.number_input("Value", min_value=0.01)
-        if st.button("Set"):
+
+        if st.button("Set Alert"):
             col = 'target_price' if atype == 'price' else 'profit_pct' if atype == 'profit' else 'drop_pct'
             new = pd.DataFrame([{'symbol': sym, col: val, 'type': atype}])
             for c in st.session_state.alerts.columns:
@@ -142,11 +135,12 @@ with tab3:
             st.success("Alert set!")
 
     if not st.session_state.alerts.empty:
+        st.subheader("Active Alerts")
         st.dataframe(st.session_state.alerts)
 
-# --- Chat ---
+# === AI Chat ===
 with tab4:
-    st.header("AI Chat")
+    st.header("AI Chat Bot")
     for msg in st.session_state.chat_history:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
@@ -169,9 +163,9 @@ with tab4:
                 st.session_state.chat_history.append({"role": "assistant", "content": ans})
         st.rerun()
 
-# Auto alert
+# Auto-check alerts
 if st.session_state.user_email and not st.session_state.investments.empty:
-    df = calculate_pnl(st.session_state.investments, get_stock_price)
+    df = calculate_pnl(st.session_state.investments)
     check_alerts(df)
 
-st.caption("StockGuardian © 2025")
+st.caption("StockGuardian © 2025 | Streamlit + yfinance + Prophet + HF")
