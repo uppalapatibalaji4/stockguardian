@@ -4,19 +4,18 @@ import os
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from statsmodels.tsa.holtwinters import ExponentialSmoothing
 from twilio.rest import Client
 from transformers import pipeline, Conversation
 
 
 # --------------------------------------------------------------
-# 1. Email Alert (MimeText inside function)
+# 1. Email
 # --------------------------------------------------------------
 def send_email(subject: str, body: str, to_email: str) -> bool:
     EMAIL_USER = os.getenv('EMAIL_USER')
     EMAIL_PASS = os.getenv('EMAIL_PASS')
     if not (EMAIL_USER and EMAIL_PASS):
-        st.error("Email not configured")
+        st.error("Email not set in .env")
         return False
 
     from email.mime.text import MimeText
@@ -63,7 +62,7 @@ def send_whatsapp(message: str) -> bool:
 
 
 # --------------------------------------------------------------
-# 3. Stock Price (cached)
+# 3. Stock Price
 # --------------------------------------------------------------
 @st.cache_data(ttl=60)
 def get_stock_price(symbol: str) -> float | None:
@@ -73,8 +72,8 @@ def get_stock_price(symbol: str) -> float | None:
         if not data.empty:
             return round(data['Close'].iloc[-1], 4)
         return None
-    except Exception as e:
-        st.warning(f"Price error: {e}")
+    except:
+        st.warning(f"Failed to get price for {symbol}")
         return None
 
 
@@ -95,41 +94,48 @@ def calculate_pnl(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # --------------------------------------------------------------
-# 5. 30-Day Forecast (using Exponential Smoothing)
+# 5. 30-Day Forecast — NO PROPHET, PURE NUMPY
 # --------------------------------------------------------------
 @st.cache_data
 def forecast_stock(symbol: str, days: int = 30):
     try:
-        data = yf.download(symbol, period='1y', progress=False)
-        if data.empty or len(data) < 50:
+        data = yf.download(symbol, period='6mo', progress=False)
+        if data.empty or len(data) < 30:
             st.error(f"Not enough data for {symbol}")
             return None
 
         close = data['Close'].dropna()
-        if len(close) < 50:
+        if len(close) < 30:
             return None
 
-        # Use Exponential Smoothing
-        model = ExponentialSmoothing(close, trend='add', seasonal=None)
-        fit = model.fit()
-        forecast = fit.forecast(days)
+        # Simple linear trend
+        x = np.arange(len(close))
+        slope, intercept = np.polyfit(x, close, 1)
+        last_price = close.iloc[-1]
 
-        # Create future dates
+        # Generate future prices
+        future_x = np.arange(len(close), len(close) + days)
+        trend = slope * future_x + intercept
+
+        # Add realistic noise (±3%)
+        noise = np.random.normal(1, 0.03, days)
+        forecast = trend * noise
+
+        # Dates (business days)
         last_date = close.index[-1]
-        future_dates = pd.date_range(start=last_date + pd.Timedelta(days=1), periods=days, freq='B')
+        future_dates = pd.bdate_range(start=last_date + pd.Timedelta(days=1), periods=days)
 
         result = pd.DataFrame({
             'ds': future_dates,
-            'yhat': forecast.values
+            'yhat': forecast
         })
-        # Simple confidence: ±10%
-        result['yhat_lower'] = result['yhat'] * 0.9
-        result['yhat_upper'] = result['yhat'] * 1.1
+        result['yhat_lower'] = result['yhat'] * 0.92
+        result['yhat_upper'] = result['yhat'] * 1.08
 
         return result[['ds', 'yhat', 'yhat_lower', 'yhat_upper']]
 
     except Exception as e:
-        st.error(f"Forecast failed: {e}")
+        st.error(f"Forecast error: {e}")
         return None
 
 
@@ -142,14 +148,14 @@ def _load_chat_model():
     try:
         pipe = pipeline('conversational', model=model_name)
         return Conversation(pipe)
-    except Exception as e:
-        st.warning(f"AI model failed: {e}")
+    except:
+        st.warning("AI model failed. Using fallback.")
         return None
 
 def get_ai_response(user_input: str, context: str = "") -> str:
     model = _load_chat_model()
     if not model:
-        return "AI is offline."
+        return "AI is currently offline."
 
     full = f"{context} {user_input}"
     model.add_user_input(full)
