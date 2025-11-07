@@ -1,176 +1,213 @@
+# app.py
 import streamlit as st
-import yfinance as yf
 import pandas as pd
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from datetime import datetime, time as dt_time
-from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-from twilio.rest import Client
-import time
+import os
+from datetime import date
 import plotly.express as px
-import plotly.graph_objects as go
+from utils import (
+    send_email, send_whatsapp, get_stock_price,
+    calculate_pnl, forecast_stock, get_ai_response
+)
 
-# ========================================
-# 1. INVESTMENTS
-# ========================================
-@st.cache_data(ttl=300)
-def load_investments():
-    try:
-        return pd.read_csv('investments.csv')
-    except FileNotFoundError:
-        return pd.DataFrame(columns=['ticker', 'buy_price', 'qty', 'date', 'platform'])
+# ----------------------------------------------------------------------
+# Session state init
+# ----------------------------------------------------------------------
+if 'investments' not in st.session_state:
+    st.session_state.investments = pd.DataFrame(
+        columns=['symbol', 'buy_price', 'quantity', 'buy_date']
+    )
+if 'user_email' not in st.session_state:
+    st.session_state.user_email = ''
+if 'alerts' not in st.session_state:
+    st.session_state.alerts = pd.DataFrame(
+        columns=['symbol', 'target_price', 'profit_pct', 'drop_pct', 'type']
+    )
+if 'chat_history' not in st.session_state:
+    st.session_state.chat_history = []
 
-def save_investments(df):
-    df.to_csv('investments.csv', index=False)
+# ----------------------------------------------------------------------
+# Helper: check all alerts
+# ----------------------------------------------------------------------
+def check_alerts(df_pnl: pd.DataFrame):
+    for _, row in st.session_state.alerts.iterrows():
+        sym = row['symbol']
+        cur = get_stock_price(sym)
+        if not cur:
+            continue
 
-# ========================================
-# 2. EMAIL ALERT
-# ========================================
-def send_email_alert(ticker, current_price, alert_type):
-    try:
-        sender = st.session_state.get("sender_email", "")
-        password = st.session_state.get("app_password", "")
-        user_email = st.session_state.get("user_email", "")
-        if not all([sender, password, user_email]):
-            return False
-        msg = MIMEMultipart()
-        msg['From'] = sender; msg['To'] = user_email; msg['Subject'] = f"Alert: {ticker}"
-        body = f"{ticker} {alert_type} at ₹{current_price:.2f}\nTime: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-        msg.attach(MIMEText(body, 'plain'))
-        server = smtplib.SMTP('smtp.gmail.com', 587)
-        server.starttls(); server.login(sender, password)
-        server.sendmail(sender, user_email, msg.as_string()); server.quit()
-        return True
-    except:
-        return False
+        msg = None
+        if row['type'] == 'price' and cur >= row['target_price']:
+            msg = f"{sym} hit target ${row['target_price']} (now ${cur:.2f})"
+        elif row['type'] == 'profit':
+            pnl_pct = df_pnl.loc[df_pnl['symbol'] == sym, 'pnl_pct'].iloc[0]
+            if pnl_pct >= row['profit_pct']:
+                msg = f"{sym} profit reached {row['profit_pct']}% (now {pnl_pct:.1f}%)"
+        elif row['type'] == 'drop':
+            pnl_pct = df_pnl.loc[df_pnl['symbol'] == sym, 'pnl_pct'].iloc[0]
+            if pnl_pct <= -abs(row['drop_pct']):
+                msg = f"{sym} dropped {row['drop_pct']}% (now {pnl_pct:.1f}%)"
 
-# ========================================
-# 3. WHATSAPP ALERT
-# ========================================
-def send_whatsapp_alert(ticker, current_price, alert_type):
-    try:
-        sid = st.secrets.get("TWILIO_SID", "")
-        token = st.secrets.get("TWILIO_TOKEN", "")
-        from_num = st.secrets.get("TWILIO_FROM", "")
-        to_num = st.session_state.get("whatsapp_number", "")
-        if not all([sid, token, from_num, to_num]):
-            return False
-        Client(sid, token).messages.create(
-            body=f"{ticker} {alert_type} at ₹{current_price:.2f}",
-            from_=f"whatsapp:{from_num}", to=f"whatsapp:{to_num}"
-        )
-        return True
-    except:
-        return False
+        if msg:
+            send_email(f"StockGuardian Alert – {sym}", msg,
+                       st.session_state.user_email)
+            send_whatsapp(msg)
 
-# ========================================
-# 4. LIVE DATA (SAFE + CACHE)
-# ========================================
-@st.cache_data(ttl=60)
-def get_live_data(ticker):
-    try:
-        time.sleep(0.5)
-        stock = yf.Ticker(ticker)
-        info = stock.info
-        hist = stock.history(period="1d")
-        if hist.empty:
-            return None, "Market closed or no data"
+# ----------------------------------------------------------------------
+# UI
+# ----------------------------------------------------------------------
+st.set_page_config(page_title="StockGuardian", layout="wide")
+st.title("StockGuardian – Your AI-Powered Stock Agent")
 
-        current = float(info.get('regularMarketPrice') or hist['Close'].iloc[-1])
-        open_p = float(info.get('regularMarketOpen') or hist['Open'].iloc[0])
-        high = float(info.get('regularMarketDayHigh') or hist['High'].max())
-        low = float(info.get('regularMarketDayLow') or hist['Low'].min())
-        volume = int(info.get('regularMarketVolume') or hist['Volume'].sum())
-        prev_close = float(info.get('regularMarketPreviousClose') or hist['Close'].iloc[-1])
+# ---------- Sidebar ----------
+with st.sidebar:
+    st.header("Setup")
+    email = st.text_input("Your Email", value=st.session_state.user_email)
+    if st.button("Save Email"):
+        st.session_state.user_email = email
+        st.success("Email saved!")
 
-        now = datetime.now().time()
-        is_open = dt_time(9, 15) <= now <= dt_time(15, 30)
+    if st.button("Run Alert Check Now"):
+        if st.session_state.investments.empty:
+            st.warning("No stocks yet.")
+        else:
+            df = calculate_pnl(st.session_state.investments)
+            check_alerts(df)
+            st.success("Alert check complete.")
 
-        return {
-            'current': current,
-            'open': open_p,
-            'high': high,
-            'low': low,
-            'volume': volume,
-            'prev_close': prev_close,
-            'change_pct': round(((current - prev_close) / prev_close) * 100, 2),
-            'market_open': is_open
-        }, None
-    except Exception as e:
-        return None, f"Error: {str(e)[:50]}"
+# ---------- Tabs ----------
+tab_dash, tab_add, tab_alert, tab_chat = st.tabs(
+    ["Dashboard", "Add Stock", "Alerts", "AI Chat"]
+)
 
-# ========================================
-# 5. P&L
-# ========================================
-def get_pnl(ticker, buy_price):
-    data, error = get_live_data(ticker)
-    if error:
-        return None, error
-    current = data['current']
-    pnl_pct = ((current - buy_price) / buy_price) * 100
-    return current, round(pnl_pct, 2)
+# ------------------- Dashboard -------------------
+with tab_dash:
+    st.header("Dashboard")
+    if st.session_state.investments.empty:
+        st.info("Add your first investment to see the dashboard.")
+    else:
+        df = calculate_pnl(st.session_state.investments)
+        st.dataframe(df[['symbol', 'current_price', 'pnl', 'pnl_pct']],
+                     use_container_width=True)
 
-# ========================================
-# 6. SENTIMENT
-# ========================================
-@st.cache_resource
-def get_sentiment_analyzer():
-    return SentimentIntensityAnalyzer()
+        total_pnl = df['pnl'].sum()
+        total_invested = df['invested'].sum()
+        total_pct = (total_pnl / total_invested) * 100 if total_invested else 0
+        c1, c2 = st.columns(2)
+        c1.metric("Total P&L", f"${total_pnl:,.2f}")
+        c2.metric("Portfolio %", f"{total_pct:.2f}%")
 
-def get_sentiment_advice(ticker):
-    try:
-        news = yf.Ticker(ticker).news[:3]
-        analyzer = get_sentiment_analyzer()
-        scores = [analyzer.polarity_scores(n['title'])['compound'] for n in news]
-        avg = sum(scores) / len(scores) if scores else 0
-        if avg > 0.3: return "Positive", "Buy"
-        elif avg < -0.3: return "Negative", "Sell"
-        else: return "Neutral", "Hold"
-    except:
-        return "Neutral", "Hold"
+        # Pie chart
+        fig_pie = px.pie(df, values='value', names='symbol',
+                         title="Portfolio Allocation")
+        st.plotly_chart(fig_pie, use_container_width=True)
 
-# ========================================
-# 7. FIXED CHART — NO CRASH
-# ========================================
-def draw_trading_chart(ticker):
-    try:
-        hist = yf.download(ticker, period='1mo', progress=False)
-        if hist.empty or len(hist) < 2:
-            fig = go.Figure()
-            fig.add_annotation(text="No historical data", xref="paper", yref="paper",
-                               x=0.5, y=0.5, showarrow=False, font=dict(size=16))
-            fig.update_layout(title=f"Chart & Forecast: {ticker}", height=400)
-            return fig
+        # Forecast selector
+        sel = st.selectbox("30-day forecast for:", df['symbol'].tolist())
+        fc = forecast_stock(sel, 30)
+        if fc is not None:
+            fig_fc = px.line(fc, x='ds', y='yhat',
+                             title=f"30-Day Forecast – {sel}")
+            fig_fc.add_scatter(x=fc['ds'], y=fc['yhat_upper'],
+                               mode='lines', name='Upper')
+            fig_fc.add_scatter(x=fc['ds'], y=fc['yhat_lower'],
+                               mode='lines', name='Lower')
+            st.plotly_chart(fig_fc, use_container_width=True)
+        else:
+            st.error("Forecast unavailable for this ticker.")
 
-        hist = hist.reset_index()
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=hist['Date'], y=hist['Close'], mode='lines', name='Close', line=dict(color='white')))
-        fig.add_trace(go.Scatter(x=hist['Date'], y=hist['High'], mode='lines', name='High', line=dict(color='green', dash='dot')))
-        fig.add_trace(go.Scatter(x=hist['Date'], y=hist['Low'], mode='lines', name='Low', line=dict(color='red', dash='dot')))
-        fig.update_layout(
-            title=f"Chart & Forecast: {ticker}",
-            xaxis_title="Date", yaxis_title="Price (₹)",
-            template="plotly_dark", height=400,
-            legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01)
-        )
-        return fig
-    except:
-        fig = go.Figure()
-        fig.add_annotation(text="Chart unavailable", xref="paper", yref="paper",
-                           x=0.5, y=0.5, showarrow=False, font=dict(size=16))
-        fig.update_layout(title=f"Chart & Forecast: {ticker}", height=400)
-        return fig
+# ------------------- Add Stock -------------------
+with tab_add:
+    st.header("Add Investment")
+    with st.form("add_stock_form"):
+        sym = st.text_input("Symbol (e.g. AAPL)").strip().upper()
+        price = st.number_input("Buy price", min_value=0.01, step=0.01)
+        qty = st.number_input("Quantity", min_value=0.01, step=0.01)
+        bdate = st.date_input("Buy date", value=date.today())
+        submitted = st.form_submit_button("Add")
+        if submitted:
+            new = pd.DataFrame({
+                'symbol': [sym],
+                'buy_price': [price],
+                'quantity': [qty],
+                'buy_date': [bdate]
+            })
+            st.session_state.investments = pd.concat(
+                [st.session_state.investments, new], ignore_index=True)
+            st.success(f"{sym} added!")
+            st.rerun()
 
-# ========================================
-# 8. TEST ALERT
-# ========================================
-def test_alert(ticker):
-    data, error = get_live_data(ticker)
-    if error:
-        st.error(error)
-        return
-    price = data['current']
-    e = send_email_alert(ticker, price, "TEST")
-    w = send_whatsapp_alert(ticker, price, "TEST")
-    st.success(f"Email: {'Sent' if e else 'Failed'} | WhatsApp: {'Sent' if w else 'Failed'}")
+# ------------------- Alerts -------------------
+with tab_alert:
+    st.header("Set Alerts")
+    if st.session_state.investments.empty:
+        st.warning("Add stocks first.")
+    else:
+        sym = st.selectbox("Stock", st.session_state.investments['symbol'].tolist())
+        atype = st.selectbox("Alert type", ['price', 'profit', 'drop'])
+
+        if atype == 'price':
+            target = st.number_input("Target price", min_value=0.01)
+            col = 'target_price'
+        else:
+            target = st.number_input(f"{atype.title()} %", min_value=0.01)
+            col = 'profit_pct' if atype == 'profit' else 'drop_pct'
+
+        if st.button("Create Alert"):
+            new_alert = pd.DataFrame({
+                'symbol': [sym],
+                col: [target],
+                'type': [atype]
+            })
+            # fill missing columns with NaN
+            for c in st.session_state.alerts.columns:
+                if c not in new_alert.columns:
+                    new_alert[c] = pd.NA
+            st.session_state.alerts = pd.concat(
+                [st.session_state.alerts, new_alert], ignore_index=True)
+            st.success("Alert created!")
+
+    if not st.session_state.alerts.empty:
+        st.subheader("Active Alerts")
+        st.dataframe(st.session_state.alerts)
+
+# ------------------- AI Chat -------------------
+with tab_chat:
+    st.header("AI Chat Bot")
+
+    # Show history
+    for msg in st.session_state.chat_history:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    if prompt := st.chat_input("Ask anything about your portfolio…"):
+        st.session_state.chat_history.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        # Build context
+        symbols = ", ".join(st.session_state.investments['symbol'].tolist())
+        context = f"User owns: {symbols}. "
+        # Try to detect a ticker in the prompt
+        mentioned = next((s for s in st.session_state.investments['symbol']
+                          if s in prompt.upper()), None)
+        if mentioned:
+            price = get_stock_price(mentioned)
+            context += f"{mentioned} current price: ${price:.2f}. "
+
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking…"):
+                answer = get_ai_response(prompt, context)
+                st.markdown(answer)
+                st.session_state.chat_history.append(
+                    {"role": "assistant", "content": answer})
+        st.rerun()
+
+# ----------------------------------------------------------------------
+# Auto-alert on every dashboard load (lightweight)
+# ----------------------------------------------------------------------
+if st.session_state.user_email and not st.session_state.investments.empty:
+    df = calculate_pnl(st.session_state.investments)
+    check_alerts(df)
+
+# ----------------------------------------------------------------------
+st.caption("StockGuardian – Streamlit • yfinance • Prophet • HuggingFace – Updated Nov 2025")
